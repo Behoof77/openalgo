@@ -4,7 +4,7 @@ const API_BASE_URL = import.meta.env.VITE_API_URL || ''
 
 // Helper to fetch CSRF token
 export async function fetchCSRFToken(): Promise<string> {
-  const response = await fetch('/auth/csrf-token', {
+  const response = await fetch(`${API_BASE_URL}/auth/csrf-token`, {
     credentials: 'include',
   })
   const data = await response.json()

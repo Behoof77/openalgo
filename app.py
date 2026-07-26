@@ -440,6 +440,9 @@ def create_app():
         csrf.exempt(app.view_functions["brlogin.samco_ip_status"])
         csrf.exempt(app.view_functions["brlogin.samco_update_ip"])
 
+        # Exempt login endpoint from CSRF protection (React SPA sends credentials before session exists)
+        csrf.exempt(app.view_functions["auth.login"])
+
         # Exempt logout endpoint from CSRF protection (safe - only destroys session)
         csrf.exempt(app.view_functions["auth.logout"])
 

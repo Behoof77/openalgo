@@ -169,6 +169,11 @@ def create_app():
 
     register_event_subscribers()
 
+    # CSRF configuration from environment variables (must be set BEFORE CSRFProtect init)
+    csrf_enabled = os.getenv("CSRF_ENABLED", "TRUE").upper() == "TRUE"
+    app.config["WTF_CSRF_ENABLED"] = csrf_enabled
+    app.config["WTF_CSRF_CHECK_REFERER"] = False
+
     # Initialize CSRF protection
     csrf = CSRFProtect(app)
 
@@ -233,10 +238,6 @@ def create_app():
     if USE_HTTPS:
         app.config["SESSION_COOKIE_NAME"] = f"__Secure-{session_cookie_name}"
 
-    # CSRF configuration from environment variables
-    csrf_enabled = os.getenv("CSRF_ENABLED", "TRUE").upper() == "TRUE"
-    app.config["WTF_CSRF_ENABLED"] = csrf_enabled
-
     # Configure CSRF cookie security to match session cookie
     csrf_cookie_name = os.getenv("CSRF_COOKIE_NAME", "csrf_token")
     csrf_cookie_samesite = os.getenv("CSRF_COOKIE_SAMESITE", session_cookie_samesite)
@@ -260,13 +261,6 @@ def create_app():
             app.config["WTF_CSRF_TIME_LIMIT"] = None  # Default to no limit if invalid
     else:
         app.config["WTF_CSRF_TIME_LIMIT"] = None  # No time limit if empty
-
-    # Disable Flask-WTF's Origin/Referer header check.
-    # CORS already validates allowed origins; the Referer check rejects
-    # legitimate cross-origin requests (e.g. Vercel frontend → backend)
-    # because the browser-sent Origin/Referer won't match the server Host.
-    # CSRF token validation remains active.
-    app.config["WTF_CSRF_CHECK_REFERER"] = False
 
     # Register RESTx API blueprint first
     # Register React frontend blueprint FIRST for migrated routes

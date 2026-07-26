@@ -53,4 +53,6 @@ def get_cors_config():
 
 
 # Initialize Flask-CORS without the app object
-cors = CORS(resources={r"/api/*": get_cors_config()})
+# Cover all routes so cross-origin requests to /auth/*, /dashboard/*,
+# /settings/*, etc. work when a separate frontend (e.g. Vercel) is used.
+cors = CORS(resources={r"/*": get_cors_config()})

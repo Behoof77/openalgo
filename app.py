@@ -220,9 +220,10 @@ def create_app():
 
     # Configure session cookie security
     session_cookie_name = os.getenv("SESSION_COOKIE_NAME", "session")
+    session_cookie_samesite = os.getenv("SESSION_COOKIE_SAMESITE", "Lax")
     app.config.update(
         SESSION_COOKIE_HTTPONLY=True,
-        SESSION_COOKIE_SAMESITE="Lax",
+        SESSION_COOKIE_SAMESITE=session_cookie_samesite,
         SESSION_COOKIE_SECURE=USE_HTTPS,
         SESSION_COOKIE_NAME=session_cookie_name,
         # PERMANENT_SESSION_LIFETIME is dynamically set at login to expire at 3:30 AM IST
@@ -238,9 +239,10 @@ def create_app():
 
     # Configure CSRF cookie security to match session cookie
     csrf_cookie_name = os.getenv("CSRF_COOKIE_NAME", "csrf_token")
+    csrf_cookie_samesite = os.getenv("CSRF_COOKIE_SAMESITE", session_cookie_samesite)
     app.config.update(
         WTF_CSRF_COOKIE_HTTPONLY=True,
-        WTF_CSRF_COOKIE_SAMESITE="Lax",
+        WTF_CSRF_COOKIE_SAMESITE=csrf_cookie_samesite,
         WTF_CSRF_COOKIE_SECURE=USE_HTTPS,
         WTF_CSRF_COOKIE_NAME=csrf_cookie_name,
     )

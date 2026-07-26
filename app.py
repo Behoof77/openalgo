@@ -261,6 +261,13 @@ def create_app():
     else:
         app.config["WTF_CSRF_TIME_LIMIT"] = None  # No time limit if empty
 
+    # Disable Flask-WTF's Origin/Referer header check.
+    # CORS already validates allowed origins; the Referer check rejects
+    # legitimate cross-origin requests (e.g. Vercel frontend → backend)
+    # because the browser-sent Origin/Referer won't match the server Host.
+    # CSRF token validation remains active.
+    app.config["WTF_CSRF_CHECK_REFERER"] = False
+
     # Register RESTx API blueprint first
     # Register React frontend blueprint FIRST for migrated routes
     # Register React frontend routes

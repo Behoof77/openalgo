@@ -172,7 +172,7 @@ def create_app():
     # CSRF configuration from environment variables (must be set BEFORE CSRFProtect init)
     csrf_enabled = os.getenv("CSRF_ENABLED", "TRUE").upper() == "TRUE"
     app.config["WTF_CSRF_ENABLED"] = csrf_enabled
-    app.config["WTF_CSRF_CHECK_REFERER"] = False
+    app.config["WTF_CSRF_SSL_STRICT"] = False
 
     # Initialize CSRF protection
     csrf = CSRFProtect(app)

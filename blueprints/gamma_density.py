@@ -13,8 +13,6 @@ Underlyings and expiries are served by the shared search blueprint
 import re
 
 from flask import Blueprint, jsonify, request, session
-from flask_cors import cross_origin
-
 from database.auth_db import get_api_key_for_tradingview
 from services.gamma_density_service import calculate_gamma_density
 from utils.logging import get_logger
@@ -26,7 +24,6 @@ gamma_density_bp = Blueprint("gamma_density_bp", __name__, url_prefix="/")
 
 
 @gamma_density_bp.route("/gammadensity/api/gamma-data", methods=["POST"])
-@cross_origin()
 @check_session_validity
 def gamma_data():
     """Get gamma density (Γ×OI) and convexity-zone data for all strikes."""

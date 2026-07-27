@@ -4,7 +4,6 @@ Serves 3D implied volatility surface data for index options.
 """
 
 from flask import Blueprint, jsonify, request, session
-from flask_cors import cross_origin
 
 from database.auth_db import get_api_key_for_tradingview, get_auth_token
 from services.vol_surface_service import get_vol_surface_data
@@ -17,7 +16,6 @@ vol_surface_bp = Blueprint("vol_surface_bp", __name__, url_prefix="/")
 
 
 @vol_surface_bp.route("/volsurface/api/surface-data", methods=["POST"])
-@cross_origin()
 @check_session_validity
 def surface_data():
     """Get 3D volatility surface data across strikes and expiries."""

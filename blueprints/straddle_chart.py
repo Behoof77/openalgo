@@ -4,7 +4,6 @@ Serves Dynamic ATM Straddle chart data for index options.
 """
 
 from flask import Blueprint, jsonify, request, session
-from flask_cors import cross_origin
 
 from database.auth_db import get_api_key_for_tradingview, get_auth_token
 from services.intervals_service import get_intervals
@@ -18,7 +17,6 @@ straddle_bp = Blueprint("straddle_bp", __name__, url_prefix="/")
 
 
 @straddle_bp.route("/straddle/api/straddle-data", methods=["POST"])
-@cross_origin()
 @check_session_validity
 def straddle_data():
     """Get Dynamic ATM Straddle time series for charting."""
@@ -67,7 +65,6 @@ def straddle_data():
 
 
 @straddle_bp.route("/straddle/api/intervals", methods=["GET"])
-@cross_origin()
 @check_session_validity
 def straddle_intervals():
     """Get broker-supported intervals for the straddle chart."""

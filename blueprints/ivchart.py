@@ -4,7 +4,6 @@ Serves intraday Implied Volatility chart data for ATM options.
 """
 
 from flask import Blueprint, jsonify, request, session
-from flask_cors import cross_origin
 
 from database.auth_db import get_api_key_for_tradingview, get_auth_token
 from services.intervals_service import get_intervals
@@ -18,7 +17,6 @@ ivchart_bp = Blueprint("ivchart_bp", __name__, url_prefix="/")
 
 
 @ivchart_bp.route("/ivchart/api/iv-data", methods=["POST"])
-@cross_origin()
 @check_session_validity
 def iv_data():
     """Get intraday IV time series for ATM CE and PE options."""
@@ -67,7 +65,6 @@ def iv_data():
 
 
 @ivchart_bp.route("/ivchart/api/default-symbols", methods=["POST"])
-@cross_origin()
 @check_session_validity
 def default_symbols():
     """Get ATM CE and PE symbol names for the given underlying and expiry."""
@@ -107,7 +104,6 @@ def default_symbols():
 
 
 @ivchart_bp.route("/ivchart/api/intervals", methods=["GET"])
-@cross_origin()
 @check_session_validity
 def intervals():
     """Get broker-supported intraday intervals."""

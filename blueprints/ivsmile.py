@@ -9,7 +9,6 @@ Endpoints:
 import re
 
 from flask import Blueprint, jsonify, request, session
-from flask_cors import cross_origin
 
 from database.auth_db import get_api_key_for_tradingview
 from services.iv_smile_service import get_iv_smile_data
@@ -22,7 +21,6 @@ ivsmile_bp = Blueprint("ivsmile_bp", __name__, url_prefix="/")
 
 
 @ivsmile_bp.route("/ivsmile/api/iv-smile-data", methods=["POST"])
-@cross_origin()
 @check_session_validity
 def iv_smile_data():
     """Get IV Smile data for all strikes."""

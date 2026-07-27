@@ -10,7 +10,6 @@ Endpoints:
 import re
 
 from flask import Blueprint, jsonify, request, session
-from flask_cors import cross_origin
 
 from database.auth_db import get_api_key_for_tradingview
 from services.oi_tracker_service import calculate_max_pain, get_oi_data
@@ -23,7 +22,6 @@ oitracker_bp = Blueprint("oitracker_bp", __name__, url_prefix="/")
 
 
 @oitracker_bp.route("/oitracker/api/oi-data", methods=["POST"])
-@cross_origin()
 @check_session_validity
 def oi_data():
     """Get Open Interest data for all strikes."""
@@ -75,7 +73,6 @@ def oi_data():
 
 
 @oitracker_bp.route("/oitracker/api/maxpain", methods=["POST"])
-@cross_origin()
 @check_session_validity
 def maxpain():
     """Calculate Max Pain for an underlying/expiry."""

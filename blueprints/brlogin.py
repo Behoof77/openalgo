@@ -13,6 +13,7 @@ from utils.auth_utils import handle_auth_failure, handle_auth_success
 from utils.config import (
     get_broker_api_key,
     get_broker_api_secret,
+    get_frontend_url,
     get_login_rate_limit_hour,
     get_login_rate_limit_min,
 )
@@ -58,7 +59,8 @@ def broker_callback(broker, para=None):
     if session.get("logged_in"):
         # Store broker in session and g
         session["broker"] = broker
-        return redirect(url_for("dashboard_bp.dashboard"))
+        frontend_url = get_frontend_url()
+        return redirect(f"{frontend_url}/dashboard")
 
     broker_auth_functions = app.broker_auth_functions
     auth_function = broker_auth_functions.get(f"{broker}_auth")

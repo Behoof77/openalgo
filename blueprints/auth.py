@@ -28,6 +28,7 @@ from database.user_db import (  # Import the function
 )
 from extensions import socketio
 from limiter import limiter  # Import the limiter instance
+from utils.config import get_frontend_url
 from utils.email_debug import debug_smtp_connection
 from utils.email_utils import send_password_reset_email, send_test_email
 from utils.ip_helper import get_real_ip
@@ -518,7 +519,8 @@ def broker_login():
         from database.auth_db import get_auth_token
 
         if get_auth_token(session.get("user")):
-            return redirect("/dashboard")
+            frontend_url = get_frontend_url()
+            return redirect(f"{frontend_url}/dashboard")
         logger.info(
             f"Broker token invalid for {session.get('user')} - allowing re-authentication"
         )

@@ -21,6 +21,7 @@ from database.master_contract_status_db import (
     update_download_stats,
     update_status,
 )
+from utils.config import get_frontend_url
 from utils.constants import CRYPTO_BROKERS
 from utils.logging import get_logger
 from utils.session import get_session_expiry_time, set_session_login_time
@@ -446,7 +447,8 @@ def handle_auth_success(auth_token, user_session_key, broker, feed_token=None, u
                 }
             ), 200
         else:
-            return redirect(url_for("dashboard_bp.dashboard"))
+            frontend_url = get_frontend_url()
+            return redirect(f"{frontend_url}/dashboard")
     else:
         logger.error(f"Failed to upsert auth token for user {user_session_key}")
         if is_ajax_request():
@@ -457,7 +459,8 @@ def handle_auth_success(auth_token, user_session_key, broker, feed_token=None, u
                 }
             ), 500
         else:
-            return redirect(url_for("auth.broker_login"))
+            frontend_url = get_frontend_url()
+            return redirect(f"{frontend_url}/login")
 
 
 def handle_auth_failure(error_message, forward_url="broker.html"):
@@ -469,8 +472,9 @@ def handle_auth_failure(error_message, forward_url="broker.html"):
     if is_ajax_request():
         return jsonify({"status": "error", "message": error_message}), 401
     else:
-        # For OAuth callbacks, redirect to broker selection with error
-        return redirect(url_for("auth.broker_login"))
+        # For OAuth callbacks, redirect to frontend login with error
+        frontend_url = get_frontend_url()
+        return redirect(f"{frontend_url}/login")
 
 
 def get_feed_token():

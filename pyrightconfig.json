@@ -1,0 +1,35 @@
+{
+  "include": [
+    "app.py",
+    "blueprints",
+    "broker",
+    "database",
+    "restx_api",
+    "services",
+    "utils",
+    "websocket_proxy",
+    "kronos_server",
+    "kronos"
+  ],
+  "exclude": [
+    ".venv",
+    "frontend",
+    "node_modules",
+    "db",
+    "log",
+    "strategies",
+    ".git",
+    "__pycache__",
+    "**/__pycache__",
+    "**/*.pyc"
+  ],
+  "venvPath": ".",
+  "venv": ".venv",
+  "extraPaths": [
+    "C:/Projects/Kronos"
+  ],
+  "reportMissingImports": "information",
+  "reportMissingTypeStubs": "none",
+  "pythonVersion": "3.12",
+  "typeCheckingMode": "basic"
+}

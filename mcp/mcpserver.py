@@ -2183,5 +2183,352 @@ def correlation_beta(
         return f"Error calculating correlation/beta: {str(e)}"
 
 
+def _post_api_v1(path: str, payload: dict[str, Any]) -> str:
+    """POST an API-key-authenticated request to an /api/v1 endpoint.
+
+    Used for analytics endpoints that have no SDK method (GEX, IV Smile,
+    OI Tracker, OI Profile, Straddle Chart, Vol Surface, IV Chart,
+    Custom Straddle). The platform REST layer resolves the API key from
+    the JSON body and calls the same services the /tools pages use.
+
+    Args:
+        path: API endpoint path, e.g. "/gex" or "/oitracker/maxpain".
+        payload: Request body fields (apikey is injected automatically).
+
+    Returns:
+        JSON string of the endpoint response, or an error message.
+    """
+    url = f"{host.rstrip('/')}/api/v1/{path.lstrip('/')}"
+    body = {"apikey": api_key, **payload}
+    try:
+        with httpx.Client(timeout=30.0) as http:
+            r = http.post(url, json=body, headers={"Content-Type": "application/json"})
+            return json.dumps(r.json(), indent=2, default=str)
+    except Exception as e:
+        return f"Error calling /api/v1{path}: {str(e)}"
+
+
+@mcp.tool()
+def get_gex_data(
+    underlying: str,
+    exchange: str,
+    expiry_date: str,
+) -> str:
+    """
+    Get Gamma Exposure (GEX) data for an underlying/expiry.
+
+    Computes per-strike GEX from option chain OI and Black-76 greeks.
+
+    Args:
+        underlying: Underlying symbol (e.g., NIFTY, BANKNIFTY, RELIANCE).
+        exchange: Exchange (NSE_INDEX, NSE, NFO, BSE_INDEX, BSE, BFO, MCX, CDS).
+        expiry_date: Expiry date in DDMMMYY format (e.g., 28NOV25).
+
+    Returns:
+        JSON with spot/futures price, lot size, ATM strike, PCR OI, total
+        CE/PE OI, total CE/PE GEX, net GEX, and the per-strike chain.
+    """
+    return _post_api_v1(
+        "/gex",
+        {
+            "underlying": underlying.upper(),
+            "exchange": exchange.upper(),
+            "expiry_date": expiry_date.upper(),
+        },
+    )
+
+
+@mcp.tool()
+def get_iv_smile_data(
+    underlying: str,
+    exchange: str,
+    expiry_date: str,
+) -> str:
+    """
+    Get Implied Volatility (IV) Smile data for an underlying/expiry.
+
+    Returns IV for all strikes so the smile curve can be plotted.
+
+    Args:
+        underlying: Underlying symbol (e.g., NIFTY, BANKNIFTY).
+        exchange: Exchange (NSE_INDEX, NSE, NFO, BSE_INDEX, BSE, BFO, MCX, CDS).
+        expiry_date: Expiry date in DDMMMYY format (e.g., 28NOV25).
+
+    Returns:
+        JSON with the per-strike IV smile for calls and puts.
+    """
+    return _post_api_v1(
+        "/ivsmile",
+        {
+            "underlying": underlying.upper(),
+            "exchange": exchange.upper(),
+            "expiry_date": expiry_date.upper(),
+        },
+    )
+
+
+@mcp.tool()
+def get_oi_data(
+    underlying: str,
+    exchange: str,
+    expiry_date: str,
+) -> str:
+    """
+    Get Open Interest (OI) data for all strikes of an expiry.
+
+    Args:
+        underlying: Underlying symbol (e.g., NIFTY, BANKNIFTY).
+        exchange: Exchange (NSE_INDEX, NSE, NFO, BSE_INDEX, BSE, BFO, MCX, CDS).
+        expiry_date: Expiry date in DDMMMYY format (e.g., 28NOV25).
+
+    Returns:
+        JSON with per-strike CE/PE open interest, change in OI, and volume.
+    """
+    return _post_api_v1(
+        "/oitracker",
+        {
+            "underlying": underlying.upper(),
+            "exchange": exchange.upper(),
+            "expiry_date": expiry_date.upper(),
+        },
+    )
+
+
+@mcp.tool()
+def calculate_max_pain(
+    underlying: str,
+    exchange: str,
+    expiry_date: str,
+) -> str:
+    """
+    Calculate Max Pain for an underlying/expiry.
+
+    Max Pain is the strike where option buyers lose the most money
+    (total payout to option writers is minimized).
+
+    Args:
+        underlying: Underlying symbol (e.g., NIFTY, BANKNIFTY).
+        exchange: Exchange (NSE_INDEX, NSE, NFO, BSE_INDEX, BSE, BFO, MCX, CDS).
+        expiry_date: Expiry date in DDMMMYY format (e.g., 28NOV25).
+
+    Returns:
+        JSON with the max pain strike and per-strike total payout.
+    """
+    return _post_api_v1(
+        "/oitracker/maxpain",
+        {
+            "underlying": underlying.upper(),
+            "exchange": exchange.upper(),
+            "expiry_date": expiry_date.upper(),
+        },
+    )
+
+
+@mcp.tool()
+def get_oi_profile_data(
+    underlying: str,
+    exchange: str,
+    expiry_date: str,
+    interval: str = "5m",
+    days: int = 5,
+) -> str:
+    """
+    Get OI Profile data with an intraday futures panel.
+
+    Args:
+        underlying: Underlying symbol (e.g., NIFTY, BANKNIFTY).
+        exchange: Exchange (NSE_INDEX, NSE, NFO, BSE_INDEX, BSE, BFO, MCX, CDS).
+        expiry_date: Expiry date in DDMMMYY format (e.g., 28NOV25).
+        interval: Candle interval for the futures panel (1m, 5m, 15m; default 5m).
+        days: Number of days of history to load (default 5, max 30).
+
+    Returns:
+        JSON with per-strike OI profile and the underlying futures series.
+    """
+    return _post_api_v1(
+        "/oiprofile",
+        {
+            "underlying": underlying.upper(),
+            "exchange": exchange.upper(),
+            "expiry_date": expiry_date.upper(),
+            "interval": interval,
+            "days": days,
+        },
+    )
+
+
+@mcp.tool()
+def get_straddle_chart_data(
+    underlying: str,
+    exchange: str,
+    expiry_date: str,
+    interval: str = "1m",
+    days: int = 5,
+) -> str:
+    """
+    Get Dynamic ATM Straddle chart data.
+
+    Computes the per-candle ATM strike and straddle value (CE + PE) with
+    the synthetic future price over the requested window.
+
+    Args:
+        underlying: Underlying symbol (e.g., NIFTY, BANKNIFTY).
+        exchange: Exchange (NSE_INDEX, NSE, NFO, BSE_INDEX, BSE, BFO, MCX, CDS).
+        expiry_date: Expiry date in DDMMMYY format (e.g., 28NOV25).
+        interval: Candle interval (default 1m).
+        days: Number of days of history to load (default 5).
+
+    Returns:
+        JSON with the straddle time series and synthetic future values.
+    """
+    return _post_api_v1(
+        "/straddle",
+        {
+            "underlying": underlying.upper(),
+            "exchange": exchange.upper(),
+            "expiry_date": expiry_date.upper(),
+            "interval": interval,
+            "days": days,
+        },
+    )
+
+
+@mcp.tool()
+def get_vol_surface_data(
+    underlying: str,
+    exchange: str,
+    expiry_dates: list[str],
+    strike_count: int = 15,
+) -> str:
+    """
+    Get 3D Volatility Surface data across expiries.
+
+    Args:
+        underlying: Underlying symbol (e.g., NIFTY, BANKNIFTY).
+        exchange: Exchange (NSE_INDEX, NSE, NFO, BSE_INDEX, BSE, BFO, MCX, CDS).
+        expiry_dates: List of expiry dates in DDMMMYY format (e.g., 28NOV25),
+                      max 8.
+        strike_count: Number of strikes above and below ATM (default 15,
+                      clamped between 5 and 40).
+
+    Returns:
+        JSON with per-expiry IV values at each strike.
+    """
+    return _post_api_v1(
+        "/volsurface",
+        {
+            "underlying": underlying.upper(),
+            "exchange": exchange.upper(),
+            "expiry_dates": [expiry.upper() for expiry in expiry_dates],
+            "strike_count": strike_count,
+        },
+    )
+
+
+@mcp.tool()
+def get_iv_chart_data(
+    underlying: str,
+    exchange: str,
+    expiry_date: str,
+    interval: str = "5m",
+    days: int = 1,
+) -> str:
+    """
+    Get intraday Implied Volatility (IV) chart data.
+
+    Args:
+        underlying: Underlying symbol (e.g., NIFTY, BANKNIFTY).
+        exchange: Exchange (NSE_INDEX, NSE, NFO, BSE_INDEX, BSE, BFO, MCX, CDS).
+        expiry_date: Expiry date in DDMMMYY format (e.g., 28NOV25).
+        interval: Candle interval (default 5m).
+        days: Number of days of history to load (default 1).
+
+    Returns:
+        JSON with the intraday IV time series for the ATM strike.
+    """
+    return _post_api_v1(
+        "/ivchart",
+        {
+            "underlying": underlying.upper(),
+            "exchange": exchange.upper(),
+            "expiry_date": expiry_date.upper(),
+            "interval": interval,
+            "days": days,
+        },
+    )
+
+
+@mcp.tool()
+def get_default_symbols(
+    underlying: str,
+    exchange: str,
+    expiry_date: str,
+) -> str:
+    """
+    Get default ATM option symbols for an underlying/expiry.
+
+    Args:
+        underlying: Underlying symbol (e.g., NIFTY, BANKNIFTY).
+        exchange: Exchange (NSE_INDEX, NSE, NFO, BSE_INDEX, BSE, BFO, MCX, CDS).
+        expiry_date: Expiry date in DDMMMYY format (e.g., 28NOV25).
+
+    Returns:
+        JSON with the ATM call and put symbols.
+    """
+    return _post_api_v1(
+        "/ivchart/default-symbols",
+        {
+            "underlying": underlying.upper(),
+            "exchange": exchange.upper(),
+            "expiry_date": expiry_date.upper(),
+        },
+    )
+
+
+@mcp.tool()
+def get_custom_straddle_simulation(
+    underlying: str,
+    exchange: str,
+    expiry_date: str,
+    interval: str = "1m",
+    days: int = 1,
+    adjustment_points: int = 50,
+    lot_size: int = 65,
+    lots: int = 1,
+) -> str:
+    """
+    Simulate a custom straddle with adjustment points and lot sizing.
+
+    Models rolling the ATM straddle when the underlying moves by
+    adjustment_points, and scales PnL by lot_size and lots.
+
+    Args:
+        underlying: Underlying symbol (e.g., NIFTY, BANKNIFTY).
+        exchange: Exchange (NSE_INDEX, NSE, NFO, BSE_INDEX, BSE, BFO, MCX, CDS).
+        expiry_date: Expiry date in DDMMMYY format (e.g., 28NOV25).
+        interval: Candle interval (default 1m).
+        days: Number of days of history to load (default 1).
+        adjustment_points: Straddle adjustment threshold in points (default 50).
+        lot_size: Contract lot size for PnL scaling (default 65).
+        lots: Number of lots to simulate (default 1).
+
+    Returns:
+        JSON with the simulated straddle PnL over the window.
+    """
+    return _post_api_v1(
+        "/straddlepnl/simulate",
+        {
+            "underlying": underlying.upper(),
+            "exchange": exchange.upper(),
+            "expiry_date": expiry_date.upper(),
+            "interval": interval,
+            "days": days,
+            "adjustment_points": adjustment_points,
+            "lot_size": lot_size,
+            "lots": lots,
+        },
+    )
+
+
 if __name__ == "__main__":
     mcp.run(transport="stdio")

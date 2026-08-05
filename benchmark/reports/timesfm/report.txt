@@ -1,0 +1,51 @@
+==============================================================
+OpenAlgo Unified Benchmark - timesfm
+==============================================================
+
+CONFIG
+  symbols           : RELIANCE
+  exchange          : NSE
+  interval          : D
+  start_date        : -
+  end_date          : -
+  horizon           : 5
+  window_size       : 512
+  step              : 1
+  profile           : fast
+
+MODEL
+  name              : timesfm
+  horizon           : 5
+  load_time_s       : 10.456
+  param_count       : 231,289,280
+  model_size_mb     : 882.32
+
+RESOURCES
+  before_load_rss_mb: 403.7
+  peak_rss_mb       : 1156.2
+
+CLASSIFICATION
+  direction_accuracy: 52.19%
+  buy  precision    : 53.15%  recall: 50.86%  f1: 51.98
+  sell precision    : 51.28%  recall: 53.57%  f1: 52.40
+  confusion tp/fp/fn/tn: 59/52/57/60
+  n_predictions     : 228
+
+REGRESSION (fractions shown as %)
+  MAE               : 2.25%
+  RMSE              : 2.85%
+  MAPE              : 255.85%
+
+RUNTIME
+  avg inference ms  : 1799.75
+  min inference ms  : 1118.30
+  max inference ms  : 2450.30
+  predictions/min   : 33.3
+  n_predictions     : 228
+
+BASELINES (direction accuracy, zero baselines skipped)
+  prev candle       : 47.58%
+  random (seed 42)  : 51.75%
+
+PER SYMBOL
+  RELIANCE    : 228 predictions, 0 skipped

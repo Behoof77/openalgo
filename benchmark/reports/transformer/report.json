@@ -1,0 +1,70 @@
+{
+  "benchmark_version": "0.1.0",
+  "generated_at": "2026-07-31T07:42:22+00:00",
+  "config": {
+    "model": "transformer",
+    "symbols": [
+      "RELIANCE"
+    ],
+    "exchange": "NSE",
+    "interval": "D",
+    "start_date": null,
+    "end_date": null,
+    "horizon": 5,
+    "window_size": 512,
+    "step": 1,
+    "max_pred": null,
+    "profile": "fast",
+    "openalgo_host": "https://skopaq.duckdns.org",
+    "seed": 42
+  },
+  "adapter": {
+    "name": "transformer",
+    "horizon": 5,
+    "load_time_s": 0.147,
+    "param_count": 880582,
+    "model_size_mb": 6.77,
+    "model_dir": "transformer-server\\models"
+  },
+  "classification": {
+    "direction_accuracy_pct": 50.88,
+    "buy_precision_pct": 50.88,
+    "buy_recall_pct": 100.0,
+    "buy_f1": 67.44,
+    "sell_precision_pct": 0.0,
+    "sell_recall_pct": 0.0,
+    "sell_f1": 0.0,
+    "confusion": {
+      "tp": 116,
+      "fp": 112,
+      "fn": 0,
+      "tn": 0
+    },
+    "n_predictions": 228
+  },
+  "regression": {
+    "mae": 0.0242,
+    "rmse": 0.0316,
+    "mape": 3.3802
+  },
+  "runtime": {
+    "load_time_s": 0.147,
+    "avg_inference_ms": 589.26,
+    "min_inference_ms": 448.5,
+    "max_inference_ms": 812.1,
+    "predictions_per_min": 101.8,
+    "n_predictions": 228
+  },
+  "baselines": {
+    "prev_candle_accuracy_pct": 47.58,
+    "random_accuracy_pct": 51.75
+  },
+  "per_symbol": {
+    "RELIANCE": {
+      "predictions": 228,
+      "skipped": 0
+    }
+  },
+  "peak_rss_mb": 1275.9,
+  "before_load_rss_mb": 1217.4
+}

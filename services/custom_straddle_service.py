@@ -11,6 +11,7 @@ Tracks cumulative PnL across days and returns a time series + trade log.
 """
 
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -123,14 +124,15 @@ def get_custom_straddle_simulation(
         if not unique_strikes:
             return False, {"status": "error", "message": "Could not determine ATM strikes"}, 400
 
-        # Fetch option history for all unique ATM strikes
+        # Fetch option history for all unique ATM strikes in parallel
         _build_sym = (
             construct_crypto_option_symbol
             if exchange.upper() in CRYPTO_EXCHANGES
             else construct_option_symbol
         )
-        strike_data = {}
-        for strike in sorted(unique_strikes):
+
+        def _fetch_strike(strike):
+            """Fetch CE and PE history for a single strike. Returns (strike, {ce, pe})."""
             ce_symbol = _build_sym(base_symbol, expiry_date.upper(), strike, "CE")
             pe_symbol = _build_sym(base_symbol, expiry_date.upper(), strike, "PE")
 
@@ -162,7 +164,20 @@ def get_custom_straddle_simulation(
                         for ts, row in df_pe.iterrows():
                             pe_lookup[ts] = float(row["close"])
 
-            strike_data[strike] = {"ce": ce_lookup, "pe": pe_lookup}
+            return strike, {"ce": ce_lookup, "pe": pe_lookup}
+
+        strike_data = {}
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = {
+                executor.submit(_fetch_strike, strike): strike
+                for strike in sorted(unique_strikes)
+            }
+            for future in as_completed(futures):
+                try:
+                    strike, data = future.result()
+                    strike_data[strike] = data
+                except Exception as e:
+                    logger.warning(f"Custom straddle: failed to fetch strike {futures[future]}: {e}")
 
         # ── Simulation ──────────────────────────────────────────────
         # Group candles by trading day

@@ -8,6 +8,7 @@ then looks up the corresponding CE and PE option prices to compute:
 - Synthetic Future = Strike + CE - PE
 """
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -208,33 +209,26 @@ def get_straddle_chart_data(
 
         logger.debug(f"Straddle chart: {len(unique_strikes)} unique ATM strikes for {base_symbol}: {sorted(unique_strikes)}")
 
-        # Step 6: For each unique strike, fetch CE and PE history
+        # Step 6: For each unique strike, fetch CE and PE history in parallel
         # Build lookup: {strike: {timestamp: {ce_close, pe_close}}}
         strike_data = {}
 
         _build_sym = construct_crypto_option_symbol if exchange.upper() in CRYPTO_EXCHANGES else construct_option_symbol
-        for strike in sorted(unique_strikes):
+
+        def _fetch_strike(strike):
+            """Fetch CE and PE history for a single strike. Returns (strike, {ce, pe})."""
             ce_symbol = _build_sym(base_symbol, expiry_date.upper(), strike, "CE")
             pe_symbol = _build_sym(base_symbol, expiry_date.upper(), strike, "PE")
 
-            # Fetch CE history
             success_ce, resp_ce, _ = get_history(
-                symbol=ce_symbol,
-                exchange=options_exchange,
-                interval=interval,
-                start_date=start_date_str,
-                end_date=end_date_str,
-                api_key=api_key,
+                symbol=ce_symbol, exchange=options_exchange,
+                interval=interval, start_date=start_date_str,
+                end_date=end_date_str, api_key=api_key,
             )
-
-            # Fetch PE history
             success_pe, resp_pe, _ = get_history(
-                symbol=pe_symbol,
-                exchange=options_exchange,
-                interval=interval,
-                start_date=start_date_str,
-                end_date=end_date_str,
-                api_key=api_key,
+                symbol=pe_symbol, exchange=options_exchange,
+                interval=interval, start_date=start_date_str,
+                end_date=end_date_str, api_key=api_key,
             )
 
             ce_lookup = {}
@@ -256,7 +250,19 @@ def get_straddle_chart_data(
                         for ts, row in df_pe.iterrows():
                             pe_lookup[ts] = float(row["close"])
 
-            strike_data[strike] = {"ce": ce_lookup, "pe": pe_lookup}
+            return strike, {"ce": ce_lookup, "pe": pe_lookup}
+
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = {
+                executor.submit(_fetch_strike, strike): strike
+                for strike in sorted(unique_strikes)
+            }
+            for future in as_completed(futures):
+                try:
+                    strike, data = future.result()
+                    strike_data[strike] = data
+                except Exception as e:
+                    logger.warning(f"Straddle chart: failed to fetch strike {futures[future]}: {e}")
 
         # Step 7: Merge — walk underlying candles, pick CE/PE from the correct strike
         series = []

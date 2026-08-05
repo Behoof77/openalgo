@@ -1,0 +1,21 @@
+# kronos dependencies
+# Core
+numpy>=1.24.0
+pandas>=2.0.0
+
+# Kronos model (PyTorch)
+torch>=2.0.0
+einops==0.8.1
+huggingface_hub>=0.23.0
+safetensors>=0.4.0
+
+# HTTP client
+httpx>=0.27.0
+
+# Config
+python-dotenv>=1.0.0
+
+# Logging (stdlib, no extra dep)
+
+# Optional: matplotlib for prediction plotting
+matplotlib>=3.9.0

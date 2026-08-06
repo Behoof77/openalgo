@@ -94,3 +94,11 @@ yarn-error.log*
 
 # Windows NUL file
 nul
+
+# ML project extraction artifacts (migrated to dedicated repos 2026-08-06)
+cookie*.txt
+*.pid
+tmp_*.py
+backtest_output/
+outputs/
+.env.bak-*

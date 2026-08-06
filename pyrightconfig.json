@@ -7,9 +7,7 @@
     "restx_api",
     "services",
     "utils",
-    "websocket_proxy",
-    "kronos_server",
-    "kronos"
+    "websocket_proxy"
   ],
   "exclude": [
     ".venv",
@@ -25,9 +23,6 @@
   ],
   "venvPath": ".",
   "venv": ".venv",
-  "extraPaths": [
-    "C:/Projects/Kronos"
-  ],
   "reportMissingImports": "information",
   "reportMissingTypeStubs": "none",
   "pythonVersion": "3.12",

@@ -257,10 +257,10 @@ FinRL expects:
 |---|---|---|
 | vishnun0027 OHLCV | YES | Standard OHLCV feeds directly |
 | tejhq OHLCV | YES | Same as above |
-| feature_engine (our package) | YES | Compute indicators, extend state space |
+| feature_engine (skopaq-ai package, moved 2026-08) | YES | Compute indicators, extend state space |
 | indic-finance sentiment | YES | Add as additional feature dimension |
 
-Our feature_engine computes all standard indicators (MACD, RSI, CCI, ADX, Bollinger, etc.).
+The skopaq-ai feature_engine computes all standard indicators (MACD, RSI, CCI, ADX, Bollinger, etc.).
 Pipeline: OHLCV -> feature_engine -> FinRL state vector.
 
 ---

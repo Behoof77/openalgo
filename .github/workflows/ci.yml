@@ -35,6 +35,8 @@ jobs:
   # Backend tests (CI-safe subset - no broker credentials needed)
   backend-test:
     runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: sqlite:///./openalgo_test.db
     steps:
       - uses: actions/checkout@v6
       - uses: astral-sh/setup-uv@v7

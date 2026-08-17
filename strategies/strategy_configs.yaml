@@ -1,0 +1,92 @@
+# strategy_configs.yaml — Strategy engine configuration
+#
+# Adding a new strategy: just add a new entry under 'strategies'.
+# No core engine changes needed.
+#
+# Fields:
+#   name:            Display name
+#   execution_mode:  INTRADAY or SWING (required)
+#   stop_mode:       STOP_AND_CLOSE or STOP_TRADING_ONLY (default: STOP_AND_CLOSE)
+#   underlying:      Base symbol (e.g., NIFTY, BANKNIFTY)
+#   exchange:        Exchange code (NFO, NSE, etc.)
+#   product:         MIS (intraday), NRML (carry), CNC (delivery)
+#   quantity:        Default order quantity
+#   symbols:         List of tradeable symbols [{symbol, exchange, lot_size}]
+#   risk:            Risk parameters {max_loss, daily_loss_limit, etc.}
+#   params:          Strategy-specific parameters
+
+strategies:
+  kronos_sizing:
+    name: "Kronos Sizing Engine"
+    execution_mode: INTRADAY
+    stop_mode: STOP_AND_CLOSE
+    underlying: NIFTY
+    exchange: NFO
+    product: MIS
+    quantity: 75
+    symbols:
+      - symbol: NIFTY
+        exchange: NFO
+    risk:
+      max_loss_points: 50
+      daily_loss_limit: 5000
+      max_consecutive_losses: 5
+      stale_market_seconds: 300
+    params:
+      sl_atr: 1.0
+      tp_atr: 2.5
+      trailing_sl_atr: 0
+      trailing_activation_atr: 0
+      max_execution_window_min: 180
+      base_qty: 75
+      kronos_timeout_seconds: 5
+      mode: validate  # validate or live
+
+  kronos_vote:
+    name: "Kronos ATM Directional"
+    execution_mode: INTRADAY
+    stop_mode: STOP_AND_CLOSE
+    underlying: NIFTY
+    exchange: NFO
+    product: MIS
+    quantity: 75
+    symbols:
+      - symbol: NIFTY
+        exchange: NFO
+    risk:
+      daily_loss_limit_pts: 50
+      max_consecutive_rejections: 5
+      stale_market_seconds: 300
+    params:
+      target_points: 20
+      stop_points: 10
+      roll_threshold_pts: 50
+      roll_hysteresis_pts: 10
+      kronos_cadence_seconds: 60
+      decision_cadence_seconds: 60
+      square_off_hhmm: "15:15"
+
+  atm_premium_ml:
+    name: "ATM Premium ML"
+    execution_mode: SWING
+    stop_mode: STOP_AND_CLOSE
+    underlying: NIFTY
+    exchange: NFO
+    product: NRML
+    quantity: 75
+    symbols:
+      - symbol: NIFTY
+        exchange: NFO
+    risk:
+      daily_loss_limit: 10000
+      max_order_rejections: 10
+      stale_market_seconds: 600
+      max_inference_latency_ms: 5000
+    params:
+      ce_threshold: 0.80
+      pe_threshold: 0.80
+      target_points: 20
+      stop_points: 10
+      kronos_cadence_seconds: 60
+      decision_cadence_seconds: 60
+      inference_mode: local  # local or remote

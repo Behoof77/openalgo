@@ -206,6 +206,7 @@ packages = []
 # Pytest configuration
 [tool.pytest.ini_options]
 testpaths = ["test"]
+pythonpath = ["."]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
 addopts = "-v --timeout=60"

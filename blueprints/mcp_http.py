@@ -13,12 +13,17 @@ Two endpoints:
   can be pushed here later; v1 does only keepalives.
 
 Auth + audit security model summarized:
+  - OAuth JWT first, OpenAlgo API key (X-API-KEY or Bearer-as-key) as
+    fallback — API keys grant read-only scopes (read:market +
+    read:account), never write:orders
   - 401 + ``WWW-Authenticate: Bearer`` on missing/bad token
   - 403 ``insufficient_scope`` on scope mismatch
   - Every tool call appended to ``log/mcp.jsonl`` with ts, jti,
-    client_id, tool, scope, params_hash, duration_ms, outcome, ip
-  - Per-token rate limit (60/min reads, 5/min writes — Phase 3 sets a
-    single conservative cap, refines per-scope in a follow-up)
+    client_id, tool, scope, params_hash, duration_ms, outcome,
+    error_code, ip
+  - Per-token rate limit (60/min reads, 50/min writes), plus a tighter
+    30/min tier for expensive analytics/snapshot tools
+    (MCP_RATE_LIMIT_EXPENSIVE)
   - Pre-write Telegram notification when configured (best-effort)
 
 See ``docs/prd/remote-mcp.md`` for the full design.
@@ -75,6 +80,23 @@ _RATE_LIMIT_WRITE = os.getenv("MCP_RATE_LIMIT_WRITE", "50 per minute")
 _DISPATCH_RATE_LIMIT = "120 per minute"
 _SSE_RATE_LIMIT = "5 per minute"
 
+# API-key fallback auth (feature flag, on by default). When True, a
+# request that fails the OAuth JWT check may present an OpenAlgo API
+# key via the X-API-KEY header (or Authorization: Bearer <key>) and be
+# granted read-only scopes. The same key store /api/v1 uses validates
+# it, so an invalid key triggers the usual per-IP tracking + ban logic.
+_MCP_API_KEY_AUTH = os.getenv("MCP_API_KEY_AUTH", "True").lower() in (
+    "true",
+    "1",
+    "yes",
+    "t",
+)
+
+# Tighter per-identity ceiling for expensive analytics/snapshot tools
+# (see _EXPENSIVE_TOOLS). Configurable via env like the read/write
+# tiers above; defaults to 30 calls per minute.
+_RATE_LIMIT_EXPENSIVE = os.getenv("MCP_RATE_LIMIT_EXPENSIVE", "30 per minute")
+
 
 # CORS allowlist — read at module load. Empty list means no Origin is
 # advertised back; hosted clients (claude.ai, chatgpt.com) need to be
@@ -115,21 +137,85 @@ def _parse_rate_spec(spec: str) -> tuple[int, int]:
 _scope_quota: dict[str, list[float]] = {}
 
 
-def _within_scope_quota(*, jti: str | None, scope: str) -> bool:
-    """True if (jti, scope) is below its configured per-window quota.
+def _within_scope_quota(
+    *, jti: str | None, scope: str, client_id: str | None = None
+) -> bool:
+    """True if (jti|client_id, scope) is below its configured per-window quota.
 
     The dispatcher-level Flask-Limiter still applies — this is a
-    second, tighter check specifically for the write scope.
+    second, tighter check specifically for the write scope. API-key
+    requests carry no jti, so their client_id (apikey:<hash>) stands
+    in as the quota identity.
     """
-    if not jti:
+    identity = jti or client_id or ""
+    if not identity:
         return False
     spec = _RATE_LIMIT_WRITE if "write:" in scope else _RATE_LIMIT_READ
     count, window = _parse_rate_spec(spec)
     now = time.time()
     cutoff = now - window
-    key = f"{jti}|{scope}"
+    key = f"{identity}|{scope}"
     bucket = _scope_quota.setdefault(key, [])
     # Drop expired hits.
+    while bucket and bucket[0] < cutoff:
+        bucket.pop(0)
+    if len(bucket) >= count:
+        return False
+    bucket.append(now)
+    return True
+
+
+# Expensive analytics/snapshot tools — cached server-side but still
+# quota'd per identity so one client can't pin the single eventlet
+# worker with back-to-back aggregations. Mirrors the server-side
+# _TOOL_CACHE_TTL set in mcp/mcpserver.py.
+_EXPENSIVE_TOOLS = frozenset(
+    {
+        "market_snapshot",
+        "option_snapshot",
+        "portfolio_snapshot",
+        "position_snapshot",
+        "analyze",
+        "analyze_market",
+        "system_health",
+        "company_snapshot",
+        "get_gex_data",
+        "get_iv_smile_data",
+        "get_oi_data",
+        "calculate_max_pain",
+        "get_oi_profile_data",
+        "get_straddle_chart_data",
+        "get_iv_chart_data",
+        "get_vol_surface_data",
+        "get_gamma_density_data",
+        "get_multi_strike_oi_data",
+        "get_custom_straddle_simulation",
+        "get_support_resistance",
+        "get_trend_snapshot",
+        "get_momentum_snapshot",
+        "get_volatility_snapshot",
+        "calculate_indicator",
+        "screen_instruments",
+        "multi_timeframe_analysis",
+        "correlation_beta",
+        "get_historical_data",
+    }
+)
+
+
+def _within_expensive_quota(*, identity: str) -> bool:
+    """True if (identity, expensive-tier) is below its per-window quota.
+
+    Uses the same sliding-window store as ``_within_scope_quota`` with
+    a synthetic scope key so the two tiers share one cleanup lifecycle.
+    """
+    if not identity:
+        return False
+    count, window = _parse_rate_spec(_RATE_LIMIT_EXPENSIVE)
+    now = time.time()
+    cutoff = now - window
+    key = f"{identity}|expensive"
+    bucket = _scope_quota.setdefault(key, [])
     while bucket and bucket[0] < cutoff:
         bucket.pop(0)
     if len(bucket) >= count:
@@ -192,6 +278,10 @@ def _rate_limit_key() -> str:
                 return f"jti:{jti}"
         except Exception:
             pass
+    if _MCP_API_KEY_AUTH:
+        api_key = _apikey_or_none()
+        if api_key:
+            return "apikey:" + hashlib.sha256(api_key.encode()).hexdigest()[:8]
     return request.remote_addr or "unknown"
 
 
@@ -294,6 +384,73 @@ def _bearer_or_none() -> str | None:
         return None
     token = parts[1].strip()
     return token or None
+
+
+def _apikey_or_none() -> str | None:
+    """Extract an OpenAlgo API key from the X-API-KEY header."""
+    key = request.headers.get("X-API-KEY", "")
+    return key.strip() or None
+
+
+# Scopes granted to API-key-authenticated requests. Deliberately
+# read-only: a leaked API key must never be able to place orders, and
+# write-side actions stay behind OAuth + the pre-write notification.
+_APIKEY_GRANTED_SCOPES = ("read:market", "read:account")
+
+
+def _verify_apikey(api_key: str) -> str | None:
+    """Validate an API key against the same store /api/v1 uses.
+
+    Returns the user_id on success, None on failure. Lazy import keeps
+    the pepper-requiring auth_db module out of the boot path until an
+    API-key request actually arrives. Invalid keys are tracked per-IP
+    by ``database.traffic_db.InvalidAPIKeyTracker`` exactly like REST
+    requests, so brute-forcing the MCP endpoint is no easier.
+    """
+    from database.auth_db import verify_api_key
+
+    try:
+        return verify_api_key(api_key)
+    except Exception:
+        logger.exception("[MCP HTTP] API key verification failed")
+        return None
+
+
+def _resolve_identity() -> tuple[dict | None, str, str | None, list[str]]:
+    """Authenticate a request: OAuth JWT first, API key as fallback.
+
+    Returns ``(claims, client_id, jti, granted_scopes)``. A valid JWT
+    wins; otherwise, when MCP_API_KEY_AUTH is on and an X-API-KEY (or
+    Bearer-as-key) header passes verification, the caller is granted
+    the read-only ``_APIKEY_GRANTED_SCOPES``. On failure returns
+    ``(None, "", None, [])`` so callers issue a 401.
+    """
+    token_str = _bearer_or_none()
+    if token_str:
+        try:
+            claims = verify_access_token(token_str)
+            return (
+                claims,
+                claims.get("client_id") or "unknown",
+                claims.get("jti"),
+                (claims.get("scope") or "").split(),
+            )
+        except AccessTokenError:
+            pass  # not a valid JWT — fall through to API key
+
+    if not _MCP_API_KEY_AUTH:
+        return None, "", None, []
+
+    api_key = _apikey_or_none()
+    if not api_key:
+        return None, "", None, []
+    user_id = _verify_apikey(api_key)
+    if not user_id:
+        return None, "", None, []
+    # client_id is a short hash of the key so audit log lines are
+    # correlatable without ever persisting the plaintext key.
+    client_id = "apikey:" + hashlib.sha256(api_key.encode()).hexdigest()[:8]
+    return {"user_id": user_id}, client_id, None, list(_APIKEY_GRANTED_SCOPES)
 
 
 def _resource_metadata_url() -> str:
@@ -413,18 +570,10 @@ def mcp_dispatch():
     """JSON-RPC 2.0 endpoint for MCP."""
     init_http_transport()  # idempotent
 
-    # ---- Bearer token check ----
-    token_str = _bearer_or_none()
-    if not token_str:
-        return _unauthorized("invalid_token", "Missing Bearer token.")
-    try:
-        claims = verify_access_token(token_str)
-    except AccessTokenError as e:
-        return _unauthorized(str(e), "")
-
-    granted_scopes = (claims.get("scope") or "").split()
-    client_id = claims.get("client_id") or "unknown"
-    jti = claims.get("jti")
+    # ---- Auth: OAuth JWT, then API-key fallback ----
+    claims, client_id, jti, granted_scopes = _resolve_identity()
+    if claims is None:
+        return _unauthorized("invalid_token", "Missing or invalid credentials.")
 
     # ---- JSON-RPC envelope parse ----
     body = request.get_json(silent=True)
@@ -539,6 +688,26 @@ def _tool_descriptor(name: str) -> dict[str, Any]:
     return descriptor
 
 
+def _map_error_code(detail: str | None) -> str:
+    """Map a tool failure string to the coarse error taxonomy.
+
+    Delegates to mcp/mcpserver.py::_map_error_code so the audit row's
+    ``error_code`` matches what tool envelopes report; unmapped or
+    unexpected input falls back to UNKNOWN_ERROR.
+    """
+    try:
+        from utils.mcp_tool_registry import _load_mcpserver_module
+
+        mod = _load_mcpserver_module()
+        if mod is not None:
+            code, _retryable = mod._map_error_code(detail or "")
+            if code:
+                return code
+    except Exception:
+        pass
+    return "UNKNOWN_ERROR"
+
+
 def _dispatch_tool_call(
     *,
     rpc_id: Any,
@@ -591,7 +760,7 @@ def _dispatch_tool_call(
     # write:orders so a stolen write token can't spam orders inside
     # its 15-minute TTL window. Values configurable via
     # MCP_RATE_LIMIT_READ / MCP_RATE_LIMIT_WRITE.
-    if not _within_scope_quota(jti=jti, scope=needed):
+    if not _within_scope_quota(jti=jti, scope=needed, client_id=client_id):
         return _jsonrpc_error(
             rpc_id,
             -32000,
@@ -600,6 +769,21 @@ def _dispatch_tool_call(
                 "scope": needed,
                 "limit": _RATE_LIMIT_WRITE if needed == SCOPE_WRITE_ORDERS else _RATE_LIMIT_READ,
             },
+        )
+
+    # Expensive analytics/snapshot tier — a second, tighter ceiling so
+    # a single client can't pin the single eventlet worker with
+    # back-to-back aggregation calls. Cached server-side (see
+    # _TOOL_CACHE_TTL in mcp/mcpserver.py), so this rarely trips in
+    # practice; it exists to bound worst-case load.
+    if tool_name in _EXPENSIVE_TOOLS and not _within_expensive_quota(
+        identity=jti or client_id
+    ):
+        return _jsonrpc_error(
+            rpc_id,
+            -32000,
+            "rate_limited",
+            data={"tool": tool_name, "limit": _RATE_LIMIT_EXPENSIVE},
         )
 
     # Pre-write notification — fires BEFORE the broker call so the
@@ -629,6 +813,15 @@ def _dispatch_tool_call(
         result_text = None
     duration_ms = int((time.perf_counter() - started) * 1000)
 
+    # Map the internal failure to the coarse error taxonomy the
+    # envelope machinery uses (mcp/mcpserver.py::_map_error_code) so
+    # operators can bucket audit rows without reading free-text.
+    error_code = None
+    if outcome != "success":
+        if outcome == "bad_arguments":
+            error_code = "INVALID_REQUEST"
+        else:
+            error_code = _map_error_code(error_detail)
     _audit_log(
         {
             "ts": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
@@ -639,6 +832,7 @@ def _dispatch_tool_call(
             "params_hash": _params_hash(arguments),
             "duration_ms": duration_ms,
             "outcome": outcome,
+            "error_code": error_code,
             "request_ip": request.remote_addr,
         }
     )
@@ -680,13 +874,9 @@ def mcp_sse():
     """
     init_http_transport()
 
-    token_str = _bearer_or_none()
-    if not token_str:
-        return _unauthorized("invalid_token", "Missing Bearer token.")
-    try:
-        verify_access_token(token_str)
-    except AccessTokenError as e:
-        return _unauthorized(str(e), "")
+    claims, _client_id, _jti, _granted_scopes = _resolve_identity()
+    if claims is None:
+        return _unauthorized("invalid_token", "Missing or invalid credentials.")
 
     def gen():
         # Initial comment so the client knows the stream is live.
@@ -718,6 +908,85 @@ def mcp_sse():
 def healthz():
     """Liveness probe for nginx / monitors. No auth; returns minimal info."""
     return jsonify({"status": "ok", "service": "openalgo-mcp"}), 200
+
+
+@mcp_http_bp.route("/health", methods=["GET"])
+def mcp_health():
+    """Rich health endpoint for monitors and MCP clients. No auth.
+
+    Unlike /healthz (a bare liveness probe), this reports versions,
+    broker and market state, the registered tool count and uptime —
+    enough for an operator dashboard or an AI client to decide whether
+    the transport is ready. Reads the loaded mcpserver module directly
+    rather than calling a tool, so it never hits the broker.
+    """
+    init_http_transport()
+    mcp_version = None
+    backend_version = None
+    broker = None
+    market_status = None
+    tool_count = None
+    uptime_seconds = None
+    try:
+        from utils.mcp_tool_registry import _load_mcpserver_module
+
+        mod = _load_mcpserver_module()
+        if mod is not None:
+            mcp_version = getattr(mod, "MCP_VERSION", None)
+            backend_version = getattr(mod, "_get_backend_version", lambda: None)()
+            broker = getattr(mod, "_get_broker", lambda: None)()
+            market_status = getattr(mod, "_get_market_status", lambda: None)()
+            tool_count = getattr(mod, "_registered_tool_count", lambda: None)()
+            start = getattr(mod, "_START_TIME", None)
+            if start is not None:
+                uptime_seconds = int(time.monotonic() - start)
+    except Exception:
+        logger.exception("[MCP health] failed to gather module stats")
+    return (
+        jsonify(
+            {
+                "status": "ok",
+                "service": "openalgo-mcp",
+                "mcp_version": mcp_version,
+                "backend_version": backend_version,
+                "platform_version": _openalgo_version(),
+                "broker": broker,
+                "market_status": market_status,
+                "tool_count": tool_count,
+                "uptime_seconds": uptime_seconds,
+            }
+        ),
+        200,
+    )
+
+
+@mcp_http_bp.route("/capabilities", methods=["GET"])
+def mcp_capabilities():
+    """Dynamic capability discovery for AI clients. Auth-gated.
+
+    Mirrors the ``get_capabilities`` tool (same payload, including
+    feature flags and rate limits) as a plain GET so a client can
+    introspect before the JSON-RPC handshake. Requires the same
+    credential as the dispatcher — JWT or API key.
+    """
+    init_http_transport()
+    claims, _client_id, _jti, _granted_scopes = _resolve_identity()
+    if claims is None:
+        return _unauthorized("invalid_token", "Missing or invalid credentials.")
+    try:
+        from utils.mcp_tool_registry import _load_mcpserver_module
+
+        mod = _load_mcpserver_module()
+        if mod is None:
+            return (
+                jsonify({"status": "error", "message": "MCP server module not loaded."}),
+                503,
+            )
+        payload = json.loads(mod.get_capabilities())
+    except Exception:
+        logger.exception("[MCP capabilities] failed to build capabilities")
+        return jsonify({"status": "error", "message": "Capabilities unavailable."}), 500
+    return jsonify(payload)
 
 
 @mcp_http_bp.route("/.well-known/oauth-protected-resource", methods=["GET"])

@@ -13,6 +13,7 @@ from utils.auth_utils import handle_auth_failure, handle_auth_success
 from utils.config import (
     get_broker_api_key,
     get_broker_api_secret,
+    get_frontend_url,
     get_login_rate_limit_hour,
     get_login_rate_limit_min,
 )
@@ -58,9 +59,10 @@ def broker_callback(broker, para=None):
     if session.get("logged_in"):
         # Store broker in session and g
         session["broker"] = broker
-        return redirect(url_for("dashboard_bp.dashboard"))
+        frontend_url = get_frontend_url()
+        return redirect(f"{frontend_url}/dashboard")
 
-    broker_auth_functions = app.broker_auth_functions
+    broker_auth_functions = app.broker_auth_functions  # type: ignore[attr-defined]
     auth_function = broker_auth_functions.get(f"{broker}_auth")
 
     if not auth_function:
@@ -939,7 +941,7 @@ def dhan_initiate_oauth():
     BROKER_API_KEY = os.getenv("BROKER_API_KEY")
     client_id = None
 
-    if ":::" in BROKER_API_KEY:
+    if BROKER_API_KEY and ":::" in BROKER_API_KEY:
         client_id, _ = BROKER_API_KEY.split(":::")
 
     if not client_id:
@@ -1023,7 +1025,7 @@ def samco_generate_otp():
     if error:
         return jsonify({"status": "error", "message": error}), 400
 
-    return jsonify({"status": "success", "message": data.get("statusMessage", "OTP sent")})
+    return jsonify({"status": "success", "message": (data or {}).get("statusMessage", "OTP sent")})
 
 
 @brlogin_bp.route("/samco/generate-secret", methods=["POST"])
@@ -1048,7 +1050,7 @@ def samco_generate_secret():
 
     return jsonify({
         "status": "success",
-        "message": data.get("statusMessage", "Secret key sent to your email"),
+        "message": (data or {}).get("statusMessage", "Secret key sent to your email"),
     })
 
 
@@ -1134,13 +1136,13 @@ def samco_update_ip():
 
     # Parse ip_updated_at from response if available
     ip_updated_at = None
-    if data and data.get("data") and data["data"].get("ip_updated_at"):
+    response_data = (data or {}).get("data", {})
+    ip_updated_at_str = response_data.get("ip_updated_at") if isinstance(response_data, dict) else None
+    if ip_updated_at_str:
         from datetime import datetime
 
         try:
-            ip_updated_at = datetime.fromisoformat(
-                data["data"]["ip_updated_at"].replace("Z", "+00:00")
-            )
+            ip_updated_at = datetime.fromisoformat(ip_updated_at_str.replace("Z", "+00:00"))
         except (ValueError, TypeError):
             pass
 
@@ -1149,5 +1151,5 @@ def samco_update_ip():
 
     return jsonify({
         "status": "success",
-        "message": data.get("statusMessage", "IP updated successfully"),
+        "message": (data or {}).get("statusMessage", "IP updated successfully"),
     })

@@ -151,6 +151,13 @@ dependencies = [
   "zipp==3.23.1",
   "zmq==0.0.0",
   "opengreeks>=0.2.0",
+  "yfinance>=1.5.2",
+  "openstatz>=0.4.1",
+  "scikit-learn>=1.9.0",
+  "joblib>=1.5.3",
+  "vectorbt>=1.0.0",
+  "xgboost>=3.3.0",
+  "pywavelets>=1.9.0",
 ]
 
 [build-system]
@@ -170,6 +177,10 @@ exclude = [
     "db",
     "log",
     "strategies",
+    # Downloaded model artifacts - the vendored inference.py stub is the
+    # upstream reference file and is intentionally left untouched.
+    "transformer-server/models",
+    "transformer_server/models",
 ]
 
 [tool.ruff.lint]

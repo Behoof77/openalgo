@@ -1,0 +1,191 @@
+name: Deploy Backend to Oracle (Staging)
+
+on:
+  push:
+    branches: [feature/kronos-integration]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-backend-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Deploy to Oracle
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      DEPLOY_BRANCH: feature/kronos-integration
+      ORACLE_WORKDIR: /home/ubuntu/openalgo
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify commit SHA
+        run: |
+          echo "DEPLOY_SHA=${{ github.sha }}" >> $GITHUB_ENV
+          echo "Deploying commit: ${{ github.sha }}"
+
+      - name: Deploy to Oracle
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.ORACLE_HOST }}
+          username: ubuntu
+          key: ${{ secrets.ORACLE_SSH_KEY }}
+          timeout: 300s
+          envs: DEPLOY_SHA,ORACLE_WORKDIR
+          script: |
+            set -euo pipefail
+            echo "=== Deployment started ==="
+            echo "Target commit: $DEPLOY_SHA"
+            echo "Working directory: $ORACLE_WORKDIR"
+
+            cd "$ORACLE_WORKDIR"
+
+            # --- 1. Fetch and verify target commit ---
+            echo "Fetching from origin..."
+            git fetch origin "$DEPLOY_BRANCH" --depth=1 2>/dev/null || git fetch origin
+
+            # Check if target commit exists locally
+            if ! git cat-file -e "$DEPLOY_SHA" 2>/dev/null; then
+              echo "ERROR: Commit $DEPLOY_SHA not found locally after fetch"
+              exit 1
+            fi
+
+            # --- 2. Save current state for rollback ---
+            CURRENT_SHA=$(git rev-parse HEAD)
+            echo "Current Oracle commit: $CURRENT_SHA"
+
+            # --- 3. Check for uncommitted changes (warn only) ---
+            if ! git diff --quiet || ! git diff --cached --quiet; then
+              echo "WARNING: Oracle has uncommitted changes:"
+              git status --short
+            fi
+
+            # --- 4. Reset to target commit (code only) ---
+            echo "Resetting to commit $DEPLOY_SHA..."
+            git reset --hard "$DEPLOY_SHA"
+
+            # --- 5. Verify .env is preserved ---
+            if [ ! -f .env ]; then
+              echo "ERROR: .env missing after reset!"
+              exit 1
+            fi
+            echo ".env preserved"
+
+            # --- 6. Verify no secrets in repo ---
+            if grep -r "OPENALGO_API_KEY=" --include="*.py" --include="*.json" --include="*.yaml" --include="*.yml" . 2>/dev/null | grep -v "\.env" | grep -v "env.get" | grep -v "os.getenv" | grep -v "injected by"; then
+              echo "ERROR: Potential secrets found in repository!"
+              exit 1
+            fi
+            echo "No secrets detected in tracked files"
+
+            # --- 7. Install/update Python dependencies if needed ---
+            if [ -f pyproject.toml ] || [ -f requirements.txt ]; then
+              echo "Installing Python dependencies..."
+              /home/ubuntu/openalgo/.venv/bin/pip install -e . --quiet 2>&1 | tail -5
+            fi
+
+            # --- 8. Restart OpenAlgo service ---
+            echo "Restarting OpenAlgo..."
+            sudo systemctl restart openalgo
+
+            # Wait for OpenAlgo to be ready
+            for i in {1..30}; do
+              if curl -s --unix-socket /home/ubuntu/openalgo/openalgo.sock "http://localhost/api/v1/ping" >/dev/null 2>&1; then
+                echo "OpenAlgo ready"
+                break
+              fi
+              sleep 2
+              if [ $i -eq 30 ]; then
+                echo "ERROR: OpenAlgo did not become ready"
+                sudo systemctl status openalgo --no-pager
+                exit 1
+              fi
+            done
+
+            # --- 9. Restart Kronos service ---
+            echo "Restarting Kronos..."
+            sudo systemctl restart kronos
+
+            # Wait for Kronos to be ready
+            for i in {1..30}; do
+              if curl -s "http://127.0.0.1:8000/health" | grep -q '"status":"ok"'; then
+                echo "Kronos ready"
+                break
+              fi
+              sleep 2
+              if [ $i -eq 30 ]; then
+                echo "ERROR: Kronos did not become ready"
+                sudo systemctl status kronos --no-pager
+                exit 1
+              fi
+            done
+
+            # --- 10. Verify exactly one Kronos instance ---
+            KRONOS_COUNT=$(ps aux | grep -E 'kronos_server\.main:app' | grep -v grep | wc -l)
+            if [ "$KRONOS_COUNT" -ne 1 ]; then
+              echo "ERROR: Expected 1 Kronos process, found $KRONOS_COUNT"
+              ps aux | grep -E 'kronos_server\.main:app' | grep -v grep
+              exit 1
+            fi
+            echo "Kronos instances: $KRONOS_COUNT (OK)"
+
+            # --- 11. Health checks ---
+            echo "=== Health Checks ==="
+
+            # OpenAlgo health
+            OPENALGO_HEALTH=$(curl -s --unix-socket /home/ubuntu/openalgo/openalgo.sock "http://localhost/api/v1/ping" 2>/dev/null || echo "FAIL")
+            if echo "$OPENALGO_HEALTH" | grep -q "OpenAlgo"; then
+              echo "OpenAlgo: HEALTHY"
+            else
+              echo "OpenAlgo: UNHEALTHY"
+              exit 1
+            fi
+
+            # Kronos health
+            KRONOS_HEALTH=$(curl -s "http://127.0.0.1:8000/health" 2>/dev/null || echo "FAIL")
+            if echo "$KRONOS_HEALTH" | grep -q '"status":"ok"'; then
+              echo "Kronos: HEALTHY"
+            else
+              echo "Kronos: UNHEALTHY"
+              exit 1
+            fi
+
+            # Kronos model info
+            MODEL_INFO=$(echo "$KRONOS_HEALTH" | grep -o '"model_name":"[^"]*"' | head -1)
+            echo "Kronos model: $MODEL_INFO"
+
+            # --- 12. Verify deployed commit matches ---
+            DEPLOYED_SHA=$(git rev-parse HEAD)
+            if [ "$DEPLOYED_SHA" != "$DEPLOY_SHA" ]; then
+              echo "ERROR: Deployed commit ($DEPLOYED_SHA) != Target commit ($DEPLOY_SHA)"
+              exit 1
+            fi
+            echo "Commit verified: $DEPLOYED_SHA"
+
+            echo "=== Deployment SUCCESS ==="
+            echo "Oracle now at commit: $DEPLOYED_SHA"
+            echo "Services: OpenAlgo + Kronos healthy"
+
+      - name: Deployment summary
+        if: success()
+        run: |
+          echo "✅ Backend deployment to Oracle successful"
+          echo "Commit: ${{ github.sha }}"
+          echo "Branch: ${{ github.ref_name }}"
+          echo "Services: OpenAlgo + Kronos verified healthy"
+
+      - name: Deployment failed
+        if: failure()
+        run: |
+          echo "❌ Backend deployment to Oracle FAILED"
+          echo "Commit: ${{ github.sha }}"
+          echo "Check workflow logs for details"

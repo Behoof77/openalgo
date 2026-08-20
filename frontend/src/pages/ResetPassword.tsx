@@ -12,6 +12,8 @@ import {
 import { useEffect, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { fetchCSRFToken } from '@/api/client'
+
+const API_BASE_URL = import.meta.env.VITE_API_URL || ''
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -129,7 +131,7 @@ export default function ResetPassword() {
 
     try {
       const csrfToken = await fetchCSRFToken()
-      const response = await fetch('/auth/reset-password', {
+      const response = await fetch(`${API_BASE_URL}/auth/reset-password`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -159,7 +161,7 @@ export default function ResetPassword() {
 
     try {
       const csrfToken = await fetchCSRFToken()
-      const response = await fetch('/auth/reset-password', {
+      const response = await fetch(`${API_BASE_URL}/auth/reset-password`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -194,7 +196,7 @@ export default function ResetPassword() {
 
     try {
       const csrfToken = await fetchCSRFToken()
-      const response = await fetch('/auth/reset-password', {
+      const response = await fetch(`${API_BASE_URL}/auth/reset-password`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -228,7 +230,7 @@ export default function ResetPassword() {
 
     try {
       const csrfToken = await fetchCSRFToken()
-      const response = await fetch('/auth/reset-password', {
+      const response = await fetch(`${API_BASE_URL}/auth/reset-password`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

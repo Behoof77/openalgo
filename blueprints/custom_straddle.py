@@ -4,8 +4,6 @@ Serves simulated intraday ATM straddle PnL with automated N-point adjustments.
 """
 
 from flask import Blueprint, jsonify, request, session
-from flask_cors import cross_origin
-
 from database.auth_db import get_api_key_for_tradingview, get_auth_token
 from database.symbol import SymToken, db_session
 from services.custom_straddle_service import get_custom_straddle_simulation
@@ -19,7 +17,6 @@ custom_straddle_bp = Blueprint("custom_straddle_bp", __name__, url_prefix="/")
 
 
 @custom_straddle_bp.route("/straddlepnl/api/simulate", methods=["POST"])
-@cross_origin()
 @check_session_validity
 def simulate():
     """Run intraday straddle simulation with adjustments."""
@@ -81,7 +78,6 @@ def simulate():
 
 
 @custom_straddle_bp.route("/straddlepnl/api/lotsize", methods=["GET"])
-@cross_origin()
 @check_session_validity
 def get_lotsize():
     """Get lot size for a given underlying and exchange from the symbol database."""
@@ -114,7 +110,6 @@ def get_lotsize():
 
 
 @custom_straddle_bp.route("/straddlepnl/api/intervals", methods=["GET"])
-@cross_origin()
 @check_session_validity
 def custom_straddle_intervals():
     """Get broker-supported intervals."""

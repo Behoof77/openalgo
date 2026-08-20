@@ -10,7 +10,6 @@ Endpoints:
 import re
 
 from flask import Blueprint, jsonify, request, session
-from flask_cors import cross_origin
 
 from database.auth_db import get_api_key_for_tradingview
 from services.intervals_service import get_intervals
@@ -27,7 +26,6 @@ oiprofile_bp = Blueprint("oiprofile_bp", __name__, url_prefix="/")
 
 
 @oiprofile_bp.route("/oiprofile/api/profile-data", methods=["POST"])
-@cross_origin()
 @check_session_validity
 def profile_data():
     """Get OI Profile data (futures candles + OI + OI change)."""
@@ -96,7 +94,6 @@ def profile_data():
 
 
 @oiprofile_bp.route("/oiprofile/api/intervals", methods=["GET"])
-@cross_origin()
 @check_session_validity
 def intervals():
     """Get broker-supported intervals filtered to 1m, 5m, 15m."""

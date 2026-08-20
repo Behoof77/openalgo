@@ -114,6 +114,66 @@ TOOL_SCOPES: dict[str, str] = {
     # check uniform without inventing a fourth scope.
     "get_openalgo_version": SCOPE_READ_MARKET,
     "validate_order_constants": SCOPE_READ_MARKET,
+    # ---- Options analytics (Options Trading Suite backend /api/v1) ----
+    # All are read-only computations over market data.
+    "get_gex_data": SCOPE_READ_MARKET,
+    "get_iv_smile_data": SCOPE_READ_MARKET,
+    "get_oi_data": SCOPE_READ_MARKET,
+    "calculate_max_pain": SCOPE_READ_MARKET,
+    "get_oi_profile_data": SCOPE_READ_MARKET,
+    "get_straddle_chart_data": SCOPE_READ_MARKET,
+    "get_vol_surface_data": SCOPE_READ_MARKET,
+    "get_iv_chart_data": SCOPE_READ_MARKET,
+    "get_default_symbols": SCOPE_READ_MARKET,
+    "get_custom_straddle_simulation": SCOPE_READ_MARKET,
+    "get_gamma_density_data": SCOPE_READ_MARKET,
+    "get_arbitrage_universe": SCOPE_READ_MARKET,
+    "get_multi_strike_oi_data": SCOPE_READ_MARKET,
+    # ---- Consolidated snapshots + analysis entry points ----
+    # Snapshots aggregate many read endpoints and are cached; they never
+    # mutate state, so they stay on the market scope even when the payload
+    # includes account-derived summaries. portfolio/position snapshots read
+    # account state (holdings, funds, open positions) so they require the
+    # account scope.
+    "analyze_market": SCOPE_READ_MARKET,
+    "analyze": SCOPE_READ_MARKET,
+    "market_snapshot": SCOPE_READ_MARKET,
+    "option_snapshot": SCOPE_READ_MARKET,
+    "company_snapshot": SCOPE_READ_MARKET,
+    "portfolio_snapshot": SCOPE_READ_ACCOUNT,
+    "position_snapshot": SCOPE_READ_ACCOUNT,
+    # Session context is per-request convenience state (broker, exchange,
+    # watchlist hints); readable by any market client.
+    "set_session_context": SCOPE_READ_MARKET,
+    "get_session_context": SCOPE_READ_MARKET,
+    # ---- Discovery / health / risk guardrails (all read-only) ----
+    "get_capabilities": SCOPE_READ_MARKET,
+    "system_health": SCOPE_READ_MARKET,
+    "validate_order": SCOPE_READ_MARKET,
+    "estimate_order_risk": SCOPE_READ_MARKET,
+    "dry_run_order": SCOPE_READ_MARKET,
+    # ---- Strategy lifecycle ----
+    # Strategy definitions carry order instructions executed by the
+    # strategy host / webhook, so mutating operations and webhook
+    # triggering require the write scope. Reading strategy configuration
+    # is account-level data.
+    "list_strategies": SCOPE_READ_ACCOUNT,
+    "get_strategy": SCOPE_READ_ACCOUNT,
+    "create_strategy": SCOPE_WRITE_ORDERS,
+    "toggle_strategy": SCOPE_WRITE_ORDERS,
+    "delete_strategy": SCOPE_WRITE_ORDERS,
+    "add_strategy_symbols": SCOPE_WRITE_ORDERS,
+    "remove_strategy_symbol": SCOPE_WRITE_ORDERS,
+    "update_strategy_times": SCOPE_WRITE_ORDERS,
+    "trigger_strategy_webhook": SCOPE_WRITE_ORDERS,
+    # ---- Strategy portfolio (tracking records, no broker side effect) ----
+    # Entries are the account owner's saved tracking data; they never
+    # place orders, so CRUD stays on the account scope.
+    "list_strategy_portfolio": SCOPE_READ_ACCOUNT,
+    "get_strategy_portfolio": SCOPE_READ_ACCOUNT,
+    "save_strategy_portfolio": SCOPE_READ_ACCOUNT,
+    "update_strategy_portfolio": SCOPE_READ_ACCOUNT,
+    "delete_strategy_portfolio": SCOPE_READ_ACCOUNT,
 }
 
 

@@ -8,7 +8,6 @@ import numpy as np
 import pandas as pd
 import pytz
 from flask import Blueprint, jsonify, redirect, render_template, request, session, url_for
-from flask_cors import cross_origin
 
 from database.auth_db import get_api_key_for_tradingview, get_auth_token
 from services.history_service import get_history
@@ -204,7 +203,6 @@ def test_chart():
 
 
 @pnltracker_bp.route("/pnltracker/api/pnl", methods=["POST"])
-@cross_origin()
 @check_session_validity
 def get_pnl_data():
     """Get intraday PnL data."""

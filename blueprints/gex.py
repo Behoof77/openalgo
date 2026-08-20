@@ -9,7 +9,6 @@ Endpoints:
 import re
 
 from flask import Blueprint, jsonify, request, session
-from flask_cors import cross_origin
 
 from database.auth_db import get_api_key_for_tradingview
 from services.gex_service import get_gex_data
@@ -22,7 +21,6 @@ gex_bp = Blueprint("gex_bp", __name__, url_prefix="/")
 
 
 @gex_bp.route("/gex/api/gex-data", methods=["POST"])
-@cross_origin()
 @check_session_validity
 def gex_data():
     """Get GEX data for all strikes."""

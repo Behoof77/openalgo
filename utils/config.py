@@ -56,3 +56,17 @@ def get_host_server() -> str:
         str: The host server URL string.
     """
     return os.getenv("HOST_SERVER", "http://127.0.0.1:5000")
+
+
+def get_frontend_url() -> str:
+    """
+    Retrieve the frontend URL for redirects after auth.
+
+    When FRONTEND_URL is set (e.g. Vercel deployment), OAuth callbacks
+    redirect there instead of to the backend's own Jinja2 templates.
+    Falls back to HOST_SERVER so single-host deployments still work.
+
+    Returns:
+        str: The frontend URL string.
+    """
+    return os.getenv("FRONTEND_URL", get_host_server())

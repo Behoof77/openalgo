@@ -95,8 +95,9 @@ def get_analyze_mode():
         db_session.commit()
 
     # Store in cache
-    _settings_cache[cache_key] = settings.analyze_mode
-    return settings.analyze_mode
+    result: bool = bool(settings.analyze_mode)
+    _settings_cache[cache_key] = result
+    return result
 
 
 def set_analyze_mode(mode: bool):

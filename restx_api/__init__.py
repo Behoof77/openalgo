@@ -12,20 +12,26 @@ api = Api(
 
 # Import namespaces
 from .analyzer import api as analyzer_ns
+from .arbitrage import api as arbitrage_ns
 from .basket_order import api as basket_order_ns
 from .cancel_all_order import api as cancel_all_order_ns
 from .cancel_gtt_order import api as cancel_gtt_order_ns
 from .cancel_order import api as cancel_order_ns
 from .chart_api import api as chart_ns
 from .close_position import api as close_position_ns
+from .custom_straddle import api as custom_straddle_ns
 from .depth import api as depth_ns
 from .expiry import api as expiry_ns
 from .funds import api as funds_ns
+from .gammadensity import api as gammadensity_ns
+from .gex import api as gex_ns
 from .gtt_orderbook import api as gtt_orderbook_ns
 from .history import api as history_ns
 from .holdings import api as holdings_ns
 from .instruments import api as instruments_ns
 from .intervals import api as intervals_ns
+from .iv_chart import api as iv_chart_ns
+from .ivsmile import api as ivsmile_ns
 from .margin import api as margin_ns
 from .market_holidays import api as market_holidays_ns
 from .market_timings import api as market_timings_ns
@@ -33,6 +39,9 @@ from .modify_gtt_order import api as modify_gtt_order_ns
 from .modify_order import api as modify_order_ns
 from .multi_option_greeks import api as multi_option_greeks_ns
 from .multiquotes import api as multiquotes_ns
+from .multistrikeoi import api as multistrikeoi_ns
+from .oi_profile import api as oi_profile_ns
+from .oi_tracker import api as oi_tracker_ns
 from .openposition import api as openposition_ns
 from .option_chain import api as option_chain_ns
 from .option_greeks import api as option_greeks_ns
@@ -50,11 +59,15 @@ from .positionbook import api as positionbook_ns
 from .quotes import api as quotes_ns
 from .search import api as search_ns
 from .split_order import api as split_order_ns
+from .straddle_chart import api as straddle_chart_ns
+from .strategy import api as strategy_ns
+from .strategy_portfolio import api as strategy_portfolio_ns
 from .symbol import api as symbol_ns
 from .synthetic_future import api as synthetic_future_ns
 from .telegram_bot import api as telegram_ns
 from .ticker import api as ticker_ns
 from .tradebook import api as tradebook_ns
+from .vol_surface import api as vol_surface_ns
 from .whatsapp_bot import api as whatsapp_ns
 
 # Add namespaces
@@ -103,3 +116,16 @@ api.add_namespace(place_gtt_order_ns, path="/placegttorder")
 api.add_namespace(modify_gtt_order_ns, path="/modifygttorder")
 api.add_namespace(cancel_gtt_order_ns, path="/cancelgttorder")
 api.add_namespace(gtt_orderbook_ns, path="/gttorderbook")
+api.add_namespace(gex_ns, path="/gex")
+api.add_namespace(ivsmile_ns, path="/ivsmile")
+api.add_namespace(oi_tracker_ns, path="/oitracker")
+api.add_namespace(oi_profile_ns, path="/oiprofile")
+api.add_namespace(straddle_chart_ns, path="/straddle")
+api.add_namespace(vol_surface_ns, path="/volsurface")
+api.add_namespace(iv_chart_ns, path="/ivchart")
+api.add_namespace(custom_straddle_ns, path="/straddlepnl")
+api.add_namespace(gammadensity_ns, path="/gammadensity")
+api.add_namespace(arbitrage_ns, path="/arbitrage")
+api.add_namespace(multistrikeoi_ns, path="/multistrikeoi")
+api.add_namespace(strategy_ns, path="/strategy")
+api.add_namespace(strategy_portfolio_ns, path="/strategyportfolio")

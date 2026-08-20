@@ -9,7 +9,6 @@ Session-authed, not exposed under /api/v1/.
 import os
 
 from flask import Blueprint, jsonify, request, session
-from flask_cors import cross_origin
 
 from database.auth_db import get_api_key_for_tradingview, get_auth_token
 from limiter import limiter
@@ -27,7 +26,6 @@ STRATEGY_CHART_LIMIT = os.getenv("STRATEGY_CHART_LIMIT", "30 per minute")
 
 
 @strategy_chart_bp.route("/strategybuilder/api/strategy-chart", methods=["POST"])
-@cross_origin()
 @check_session_validity
 @limiter.limit(STRATEGY_CHART_LIMIT)
 def strategy_chart_data():
@@ -86,7 +84,6 @@ def strategy_chart_data():
 
 
 @strategy_chart_bp.route("/strategybuilder/api/multi-strike-oi", methods=["POST"])
-@cross_origin()
 @check_session_validity
 @limiter.limit(STRATEGY_CHART_LIMIT)
 def multi_strike_oi_data():
@@ -145,7 +142,6 @@ def multi_strike_oi_data():
 
 
 @strategy_chart_bp.route("/strategybuilder/api/intervals", methods=["GET"])
-@cross_origin()
 @check_session_validity
 def strategy_chart_intervals():
     """Proxy broker-supported intervals for the Strategy Chart tab."""

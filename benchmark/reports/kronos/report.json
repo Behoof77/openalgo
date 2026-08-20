@@ -1,0 +1,70 @@
+{
+  "benchmark_version": "0.1.0",
+  "generated_at": "2026-07-31T07:32:54+00:00",
+  "config": {
+    "model": "kronos",
+    "symbols": [
+      "RELIANCE"
+    ],
+    "exchange": "NSE",
+    "interval": "D",
+    "start_date": null,
+    "end_date": null,
+    "horizon": 5,
+    "window_size": 512,
+    "step": 1,
+    "max_pred": null,
+    "profile": "fast",
+    "openalgo_host": "https://skopaq.duckdns.org",
+    "seed": 42
+  },
+  "adapter": {
+    "name": "kronos",
+    "horizon": 5,
+    "load_time_s": 8.061,
+    "param_count": 24741376,
+    "model_size_mb": 94.4,
+    "model_dir": "kronos-server\\models\\Kronos-small"
+  },
+  "classification": {
+    "direction_accuracy_pct": 50.44,
+    "buy_precision_pct": 51.67,
+    "buy_recall_pct": 53.45,
+    "buy_f1": 52.54,
+    "sell_precision_pct": 49.53,
+    "sell_recall_pct": 47.75,
+    "sell_f1": 48.62,
+    "confusion": {
+      "tp": 62,
+      "fp": 58,
+      "fn": 54,
+      "tn": 53
+    },
+    "n_predictions": 228
+  },
+  "regression": {
+    "mae": 0.032,
+    "rmse": 0.0403,
+    "mape": 7.0349
+  },
+  "runtime": {
+    "load_time_s": 8.061,
+    "avg_inference_ms": 5138.85,
+    "min_inference_ms": 3883.3,
+    "max_inference_ms": 6441.6,
+    "predictions_per_min": 11.7,
+    "n_predictions": 228
+  },
+  "baselines": {
+    "prev_candle_accuracy_pct": 47.58,
+    "random_accuracy_pct": 51.75
+  },
+  "per_symbol": {
+    "RELIANCE": {
+      "predictions": 228,
+      "skipped": 0
+    }
+  },
+  "peak_rss_mb": 432.7,
+  "before_load_rss_mb": 84.5
+}

@@ -28,6 +28,7 @@ from database.user_db import (  # Import the function
 )
 from extensions import socketio
 from limiter import limiter  # Import the limiter instance
+from utils.config import get_frontend_url
 from utils.email_debug import debug_smtp_connection
 from utils.email_utils import send_password_reset_email, send_test_email
 from utils.ip_helper import get_real_ip
@@ -96,7 +97,7 @@ def get_broker_config():
     broker_name is always returned (needed to display the broker login button).
     broker_api_key and redirect_url are only returned when authenticated.
     """
-    REDIRECT_URL = os.getenv("REDIRECT_URL")
+    REDIRECT_URL: str = os.getenv("REDIRECT_URL") or ""  # type: ignore[assignment]
 
     # Extract broker name from redirect URL
     match = re.search(r"/([^/]+)/callback$", REDIRECT_URL)
@@ -518,7 +519,8 @@ def broker_login():
         from database.auth_db import get_auth_token
 
         if get_auth_token(session.get("user")):
-            return redirect("/dashboard")
+            frontend_url = get_frontend_url()
+            return redirect(f"{frontend_url}/dashboard")
         logger.info(
             f"Broker token invalid for {session.get('user')} - allowing re-authentication"
         )
@@ -528,6 +530,11 @@ def broker_login():
 
         # Redirect to React broker selection page
         return redirect("/broker")
+
+    if "user" not in session:
+        return jsonify({"status": "error", "message": "Session expired, please log in again"}), 401
+
+    return jsonify({"status": "error", "message": "No broker session to resume"}), 400
 
 
 @auth_bp.route("/reset-password", methods=["GET", "POST"])
@@ -1322,7 +1329,7 @@ def get_profile_data():
                 qr.make(fit=True)
 
                 img_buffer = io.BytesIO()
-                qr.make_image(fill_color="black", back_color="white").save(img_buffer, format="PNG")
+                qr.make_image(fill_color="black", back_color="white").save(img_buffer, format="PNG")  # type: ignore[arg-type]
                 qr_code = base64.b64encode(img_buffer.getvalue()).decode()
                 # Use the public getter that decrypts the at-rest ciphertext.
                 # `user.totp_secret` is the raw column value (ciphertext);

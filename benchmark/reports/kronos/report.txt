@@ -1,0 +1,51 @@
+==============================================================
+OpenAlgo Unified Benchmark - kronos
+==============================================================
+
+CONFIG
+  symbols           : RELIANCE
+  exchange          : NSE
+  interval          : D
+  start_date        : -
+  end_date          : -
+  horizon           : 5
+  window_size       : 512
+  step              : 1
+  profile           : fast
+
+MODEL
+  name              : kronos
+  horizon           : 5
+  load_time_s       : 8.061
+  param_count       : 24,741,376
+  model_size_mb     : 94.4
+
+RESOURCES
+  before_load_rss_mb: 84.5
+  peak_rss_mb       : 432.7
+
+CLASSIFICATION
+  direction_accuracy: 50.44%
+  buy  precision    : 51.67%  recall: 53.45%  f1: 52.54
+  sell precision    : 49.53%  recall: 47.75%  f1: 48.62
+  confusion tp/fp/fn/tn: 62/58/54/53
+  n_predictions     : 228
+
+REGRESSION (fractions shown as %)
+  MAE               : 3.20%
+  RMSE              : 4.03%
+  MAPE              : 703.49%
+
+RUNTIME
+  avg inference ms  : 5138.85
+  min inference ms  : 3883.30
+  max inference ms  : 6441.60
+  predictions/min   : 11.7
+  n_predictions     : 228
+
+BASELINES (direction accuracy, zero baselines skipped)
+  prev candle       : 47.58%
+  random (seed 42)  : 51.75%
+
+PER SYMBOL
+  RELIANCE    : 228 predictions, 0 skipped

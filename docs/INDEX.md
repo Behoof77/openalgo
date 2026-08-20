@@ -38,6 +38,8 @@ need → drill into the specific file. Don't load everything at once.
 
 | Feature | Entry point |
 |---|---|
+| Feature Engine (indicators, stats, labels, preprocessing) | [feature-engine.md](feature-engine.md) |
+| Dataset Research (open-source datasets for ML training) | [dataset-research.md](dataset-research.md) |
 | Scalping Terminal (`/scalping`) | [scalping/PRD.md](scalping/PRD.md) |
 | Scanner architecture | [scanner-architecture.md](scanner-architecture.md) |
 | WhatsApp alerts | [whatsapp.md](whatsapp.md) |

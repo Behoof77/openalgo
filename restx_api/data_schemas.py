@@ -255,3 +255,235 @@ class MultiOptionGreeksSchema(Schema):
         required=False, validate=validate.Range(min=0, max=100)
     )  # Common interest rate for all
     expiry_time = fields.Str(required=False)  # Optional: Common expiry time for all
+
+
+class GexSchema(Schema):
+    """Schema for Gamma Exposure (GEX) data requests"""
+
+    apikey = fields.Str(required=True, validate=validate.Length(min=1, max=256))  # API Key for authentication
+    underlying = fields.Str(required=True)  # Underlying symbol (e.g., NIFTY, BANKNIFTY, RELIANCE)
+    exchange = fields.Str(
+        required=True, validate=validate.OneOf(VALID_EXCHANGES)
+    )  # Exchange (NSE_INDEX, NSE, NFO, BSE_INDEX, BSE, BFO, MCX, CDS)
+    expiry_date = fields.Str(required=True)  # Expiry date in DDMMMYY format (e.g., 28NOV25)
+
+
+class IvSmileSchema(Schema):
+    """Schema for Implied Volatility Smile data requests"""
+
+    apikey = fields.Str(required=True, validate=validate.Length(min=1, max=256))  # API Key for authentication
+    underlying = fields.Str(required=True)  # Underlying symbol (e.g., NIFTY, BANKNIFTY)
+    exchange = fields.Str(
+        required=True, validate=validate.OneOf(VALID_EXCHANGES)
+    )  # Exchange (NSE_INDEX, NSE, NFO, BSE_INDEX, BSE, BFO, MCX, CDS)
+    expiry_date = fields.Str(required=True)  # Expiry date in DDMMMYY format (e.g., 28NOV25)
+
+
+class OiDataSchema(Schema):
+    """Schema for Open Interest data requests"""
+
+    apikey = fields.Str(required=True, validate=validate.Length(min=1, max=256))  # API Key for authentication
+    underlying = fields.Str(required=True)  # Underlying symbol (e.g., NIFTY, BANKNIFTY)
+    exchange = fields.Str(
+        required=True, validate=validate.OneOf(VALID_EXCHANGES)
+    )  # Exchange (NSE_INDEX, NSE, NFO, BSE_INDEX, BSE, BFO, MCX, CDS)
+    expiry_date = fields.Str(required=True)  # Expiry date in DDMMMYY format (e.g., 28NOV25)
+
+
+class MaxPainSchema(Schema):
+    """Schema for Max Pain calculation requests"""
+
+    apikey = fields.Str(required=True, validate=validate.Length(min=1, max=256))  # API Key for authentication
+    underlying = fields.Str(required=True)  # Underlying symbol (e.g., NIFTY, BANKNIFTY)
+    exchange = fields.Str(
+        required=True, validate=validate.OneOf(VALID_EXCHANGES)
+    )  # Exchange (NSE_INDEX, NSE, NFO, BSE_INDEX, BSE, BFO, MCX, CDS)
+    expiry_date = fields.Str(required=True)  # Expiry date in DDMMMYY format (e.g., 28NOV25)
+
+
+class OiProfileSchema(Schema):
+    """Schema for OI Profile data requests"""
+
+    apikey = fields.Str(required=True, validate=validate.Length(min=1, max=256))  # API Key for authentication
+    underlying = fields.Str(required=True)  # Underlying symbol (e.g., NIFTY, BANKNIFTY)
+    exchange = fields.Str(
+        required=True, validate=validate.OneOf(VALID_EXCHANGES)
+    )  # Exchange (NSE_INDEX, NSE, NFO, BSE_INDEX, BSE, BFO, MCX, CDS)
+    expiry_date = fields.Str(required=True)  # Expiry date in DDMMMYY format (e.g., 28NOV25)
+    interval = fields.Str(
+        required=False, load_default="5m", validate=validate.OneOf(["1m", "5m", "15m"])
+    )  # Candle interval for the futures panel
+    days = fields.Int(
+        required=False, load_default=5, validate=validate.Range(min=1, max=30)
+    )  # Number of days of history to load
+
+
+class StraddleChartSchema(Schema):
+    """Schema for Dynamic ATM Straddle chart data requests"""
+
+    apikey = fields.Str(required=True, validate=validate.Length(min=1, max=256))  # API Key for authentication
+    underlying = fields.Str(required=True)  # Underlying symbol (e.g., NIFTY, BANKNIFTY)
+    exchange = fields.Str(
+        required=True, validate=validate.OneOf(VALID_EXCHANGES)
+    )  # Exchange (NSE_INDEX, NSE, NFO, BSE_INDEX, BSE, BFO, MCX, CDS)
+    expiry_date = fields.Str(required=True)  # Expiry date in DDMMMYY format (e.g., 28NOV25)
+    interval = fields.Str(required=False, load_default="1m")  # Candle interval (e.g., 1m, 5m, 15m)
+    days = fields.Int(
+        required=False, load_default=5, validate=validate.Range(min=1, max=30)
+    )  # Number of days of history to load
+
+
+class VolSurfaceSchema(Schema):
+    """Schema for 3D Volatility Surface data requests"""
+
+    apikey = fields.Str(required=True, validate=validate.Length(min=1, max=256))  # API Key for authentication
+    underlying = fields.Str(required=True)  # Underlying symbol (e.g., NIFTY, BANKNIFTY)
+    exchange = fields.Str(
+        required=True, validate=validate.OneOf(VALID_EXCHANGES)
+    )  # Exchange (NSE_INDEX, NSE, NFO, BSE_INDEX, BSE, BFO, MCX, CDS)
+    expiry_dates = fields.List(
+        fields.Str(required=True), required=True, validate=validate.Length(min=1, max=8)
+    )  # List of expiry dates in DDMMMYY format (e.g., 28NOV25), max 8
+    strike_count = fields.Int(
+        required=False, load_default=15, validate=validate.Range(min=5, max=40)
+    )  # Number of strikes above and below ATM
+
+
+class IvChartSchema(Schema):
+    """Schema for intraday Implied Volatility chart data requests"""
+
+    apikey = fields.Str(required=True, validate=validate.Length(min=1, max=256))  # API Key for authentication
+    underlying = fields.Str(required=True)  # Underlying symbol (e.g., NIFTY, BANKNIFTY)
+    exchange = fields.Str(
+        required=True, validate=validate.OneOf(VALID_EXCHANGES)
+    )  # Exchange (NSE_INDEX, NSE, NFO, BSE_INDEX, BSE, BFO, MCX, CDS)
+    expiry_date = fields.Str(required=True)  # Expiry date in DDMMMYY format (e.g., 28NOV25)
+    interval = fields.Str(required=False, load_default="5m")  # Candle interval (e.g., 1m, 5m, 15m)
+    days = fields.Int(
+        required=False, load_default=1, validate=validate.Range(min=1, max=30)
+    )  # Number of days of history to load
+
+
+class DefaultSymbolsSchema(Schema):
+    """Schema for ATM default symbol lookup requests"""
+
+    apikey = fields.Str(required=True, validate=validate.Length(min=1, max=256))  # API Key for authentication
+    underlying = fields.Str(required=True)  # Underlying symbol (e.g., NIFTY, BANKNIFTY)
+    exchange = fields.Str(
+        required=True, validate=validate.OneOf(VALID_EXCHANGES)
+    )  # Exchange (NSE_INDEX, NSE, NFO, BSE_INDEX, BSE, BFO, MCX, CDS)
+    expiry_date = fields.Str(required=True)  # Expiry date in DDMMMYY format (e.g., 28NOV25)
+
+
+class CustomStraddleSchema(Schema):
+    """Schema for custom straddle simulation requests"""
+
+    apikey = fields.Str(required=True, validate=validate.Length(min=1, max=256))  # API Key for authentication
+    underlying = fields.Str(required=True)  # Underlying symbol (e.g., NIFTY, BANKNIFTY)
+    exchange = fields.Str(
+        required=True, validate=validate.OneOf(VALID_EXCHANGES)
+    )  # Exchange (NSE_INDEX, NSE, NFO, BSE_INDEX, BSE, BFO, MCX, CDS)
+    expiry_date = fields.Str(required=True)  # Expiry date in DDMMMYY format (e.g., 28NOV25)
+    interval = fields.Str(required=False, load_default="1m")  # Candle interval (e.g., 1m, 5m, 15m)
+    days = fields.Int(
+        required=False, load_default=1, validate=validate.Range(min=1, max=30)
+    )  # Number of days of history to load
+    adjustment_points = fields.Int(
+        required=False, load_default=50, validate=validate.Range(min=1)
+    )  # Straddle adjustment threshold in points
+    lot_size = fields.Int(
+        required=False, load_default=65, validate=validate.Range(min=1)
+    )  # Contract lot size for PnL scaling
+    lots = fields.Int(
+        required=False, load_default=1, validate=validate.Range(min=1)
+    )  # Number of lots to simulate
+
+
+class GammaDensitySchema(Schema):
+    """Schema for gamma density requests"""
+
+    apikey = fields.Str(required=True, validate=validate.Length(min=1, max=256))  # API Key for authentication
+    underlying = fields.Str(required=True)  # Underlying symbol (e.g., NIFTY, BANKNIFTY)
+    exchange = fields.Str(
+        required=True, validate=validate.OneOf(VALID_EXCHANGES)
+    )  # Exchange (NSE_INDEX, NSE, NFO, BSE_INDEX, BSE, BFO, MCX, CDS)
+    expiry_date = fields.Str(required=True)  # Expiry date in DDMMMYY format (e.g., 28NOV25)
+    interest_rate = fields.Float(
+        required=False, allow_none=True
+    )  # Optional risk-free interest rate override (fraction, e.g. 0.065)
+
+
+class ArbitrageSchema(Schema):
+    """Schema for arbitrage universe requests"""
+
+    apikey = fields.Str(required=True, validate=validate.Length(min=1, max=256))  # API Key for authentication
+    exchanges = fields.List(
+        fields.Str(), required=False, allow_none=True
+    )  # Optional exchange filter (e.g., NFO, MCX, BFO, CDS)
+
+
+class MultiStrikeOISchema(Schema):
+    """Schema for multi strike open interest requests"""
+
+    apikey = fields.Str(required=True, validate=validate.Length(min=1, max=256))  # API Key for authentication
+    underlying = fields.Str(required=True)  # Underlying symbol (e.g., NIFTY, BANKNIFTY)
+    exchange = fields.Str(
+        required=True, validate=validate.OneOf(VALID_EXCHANGES)
+    )  # Exchange (NSE_INDEX, NSE, NFO, BSE_INDEX, BSE, BFO, MCX, CDS)
+    legs = fields.List(
+        fields.Dict(), required=True, validate=validate.Length(min=1)
+    )  # List of option legs (symbol, exchange, side, strike, optionType, expiry)
+    interval = fields.Str(required=False, load_default="1m")  # Candle interval (e.g., 1m, 5m, 15m)
+    days = fields.Int(
+        required=False, load_default=5, validate=validate.Range(min=1, max=30)
+    )  # Number of days of history to load
+
+
+class StrategyCreateSchema(Schema):
+    """Schema for strategy creation requests"""
+
+    apikey = fields.Str(required=True, validate=validate.Length(min=1, max=256))  # API Key for authentication
+    platform = fields.Str(required=True)  # Platform type (e.g., tradingview, chartink)
+    name = fields.Str(required=True)  # Strategy name
+    strategy_type = fields.Str(required=False, load_default="intraday")  # Strategy type (intraday or positional)
+    trading_mode = fields.Str(required=False, load_default="LONG")  # Trading mode (LONG, SHORT, or BOTH)
+    start_time = fields.Str(required=False, allow_none=True)  # Entry window start (HH:MM, 24h)
+    end_time = fields.Str(required=False, allow_none=True)  # Entry window end (HH:MM, 24h)
+    squareoff_time = fields.Str(required=False, allow_none=True)  # Square off time (HH:MM, 24h)
+
+
+class StrategySymbolsSchema(Schema):
+    """Schema for adding symbol mappings to a strategy"""
+
+    apikey = fields.Str(required=True, validate=validate.Length(min=1, max=256))  # API Key for authentication
+    symbols = fields.List(
+        fields.Dict(), required=True, validate=validate.Length(min=1)
+    )  # List of symbols with exchange, quantity, product_type
+
+
+class StrategyTimesSchema(Schema):
+    """Schema for updating strategy trading times"""
+
+    apikey = fields.Str(required=True, validate=validate.Length(min=1, max=256))  # API Key for authentication
+    start_time = fields.Str(required=False, allow_none=True)  # Entry window start (HH:MM, 24h)
+    end_time = fields.Str(required=False, allow_none=True)  # Entry window end (HH:MM, 24h)
+    squareoff_time = fields.Str(required=False, allow_none=True)  # Square off time (HH:MM, 24h)
+
+
+class StrategyPortfolioSchema(Schema):
+    """Schema for strategy portfolio create/update requests"""
+
+    apikey = fields.Str(required=True, validate=validate.Length(min=1, max=256))  # API Key for authentication
+    name = fields.Str(required=True, validate=validate.Length(max=120))  # Portfolio entry name
+    watchlist = fields.Str(
+        required=True, validate=validate.OneOf(["mytrades", "simulation"])
+    )  # Watchlist (mytrades or simulation)
+    underlying = fields.Str(required=True)  # Underlying symbol (e.g., NIFTY, BANKNIFTY)
+    exchange = fields.Str(
+        required=True, validate=validate.OneOf(VALID_EXCHANGES)
+    )  # Exchange (NSE_INDEX, NSE, NFO, BSE_INDEX, BSE, BFO, MCX, CDS)
+    expiry = fields.Str(required=False, allow_none=True)  # Expiry date in DDMMMYY format (e.g., 28NOV25)
+    legs = fields.List(
+        fields.Dict(), required=True, validate=validate.Length(min=1)
+    )  # List of strategy legs (option or future definitions)
+    notes = fields.Str(required=False, allow_none=True)  # Optional notes

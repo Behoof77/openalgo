@@ -9,8 +9,6 @@ Endpoints:
 """
 
 from flask import Blueprint, jsonify, request, session
-from flask_cors import cross_origin
-
 from database.auth_db import get_api_key_for_tradingview
 from services.arbitrage_service import DEFAULT_EXCHANGES, get_arbitrage_universe
 from utils.logging import get_logger
@@ -22,7 +20,6 @@ arbitrage_bp = Blueprint("arbitrage_bp", __name__, url_prefix="/")
 
 
 @arbitrage_bp.route("/arbitrage/api/universe", methods=["GET"])
-@cross_origin()
 @check_session_validity
 def arbitrage_universe():
     """Return the calendar-spread universe for the requested exchanges."""

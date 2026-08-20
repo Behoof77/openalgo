@@ -169,6 +169,11 @@ def create_app():
 
     register_event_subscribers()
 
+    # CSRF configuration from environment variables (must be set BEFORE CSRFProtect init)
+    csrf_enabled = os.getenv("CSRF_ENABLED", "TRUE").upper() == "TRUE"
+    app.config["WTF_CSRF_ENABLED"] = csrf_enabled
+    app.config["WTF_CSRF_SSL_STRICT"] = False
+
     # Initialize CSRF protection
     csrf = CSRFProtect(app)
 
@@ -220,9 +225,10 @@ def create_app():
 
     # Configure session cookie security
     session_cookie_name = os.getenv("SESSION_COOKIE_NAME", "session")
+    session_cookie_samesite = os.getenv("SESSION_COOKIE_SAMESITE", "Lax")
     app.config.update(
         SESSION_COOKIE_HTTPONLY=True,
-        SESSION_COOKIE_SAMESITE="Lax",
+        SESSION_COOKIE_SAMESITE=session_cookie_samesite,
         SESSION_COOKIE_SECURE=USE_HTTPS,
         SESSION_COOKIE_NAME=session_cookie_name,
         # PERMANENT_SESSION_LIFETIME is dynamically set at login to expire at 3:30 AM IST
@@ -232,15 +238,12 @@ def create_app():
     if USE_HTTPS:
         app.config["SESSION_COOKIE_NAME"] = f"__Secure-{session_cookie_name}"
 
-    # CSRF configuration from environment variables
-    csrf_enabled = os.getenv("CSRF_ENABLED", "TRUE").upper() == "TRUE"
-    app.config["WTF_CSRF_ENABLED"] = csrf_enabled
-
     # Configure CSRF cookie security to match session cookie
     csrf_cookie_name = os.getenv("CSRF_COOKIE_NAME", "csrf_token")
+    csrf_cookie_samesite = os.getenv("CSRF_COOKIE_SAMESITE", session_cookie_samesite)
     app.config.update(
         WTF_CSRF_COOKIE_HTTPONLY=True,
-        WTF_CSRF_COOKIE_SAMESITE="Lax",
+        WTF_CSRF_COOKIE_SAMESITE=csrf_cookie_samesite,
         WTF_CSRF_COOKIE_SECURE=USE_HTTPS,
         WTF_CSRF_COOKIE_NAME=csrf_cookie_name,
     )
@@ -436,6 +439,9 @@ def create_app():
         csrf.exempt(app.view_functions["brlogin.samco_save_secret"])
         csrf.exempt(app.view_functions["brlogin.samco_ip_status"])
         csrf.exempt(app.view_functions["brlogin.samco_update_ip"])
+
+        # Exempt login endpoint from CSRF protection (React SPA sends credentials before session exists)
+        csrf.exempt(app.view_functions["auth.login"])
 
         # Exempt logout endpoint from CSRF protection (safe - only destroys session)
         csrf.exempt(app.view_functions["auth.logout"])

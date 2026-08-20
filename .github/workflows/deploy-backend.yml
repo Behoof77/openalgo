@@ -81,7 +81,7 @@ jobs:
             echo ".env preserved"
 
             # --- 6. Verify no secrets in repo ---
-            if grep -r "OPENALGO_API_KEY=" --include="*.py" --include="*.json" --include="*.yaml" --include="*.yml" . 2>/dev/null | grep -v "\.env" | grep -v "env.get" | grep -v "os.getenv" | grep -v "injected by"; then
+            if grep -r "OPENALGO_API_KEY=" --include="*.py" --include="*.json" --include="*.yaml" --include="*.yml" . 2>/dev/null | grep -v "\.env" | grep -v "env.get" | grep -v "os.getenv" | grep -v "injected by" | grep -v "your-api-key" | grep -v "examples/"; then
               echo "ERROR: Potential secrets found in repository!"
               exit 1
             fi

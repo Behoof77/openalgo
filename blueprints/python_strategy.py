@@ -504,6 +504,17 @@ def start_strategy_process(strategy_id):
             # Inject documented strategy environment variables
             # (per strategies/README.md: STRATEGY_ID, STRATEGY_NAME, OPENALGO_API_KEY, OPENALGO_HOST)
             strategy_env = os.environ.copy()
+
+            # Ensure the project root is on PYTHONPATH so strategy scripts can
+            # import packages like `strategies.shared` that live at the repo root.
+            # Without this, Python only puts the script's own directory on sys.path[0].
+            project_root = str(Path.cwd())
+            existing_py = strategy_env.get("PYTHONPATH", "")
+            if project_root not in existing_py.split(os.pathsep):
+                strategy_env["PYTHONPATH"] = (
+                    project_root + os.pathsep + existing_py if existing_py else project_root
+                )
+
             strategy_env["STRATEGY_ID"] = strategy_id
             strategy_env["STRATEGY_NAME"] = config.get("name", strategy_id)
             strategy_env["OPENALGO_STRATEGY_EXCHANGE"] = normalize_exchange(

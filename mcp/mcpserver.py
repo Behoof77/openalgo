@@ -1,8 +1,12 @@
+import functools
 import json
 import os
+import re
 import sys
-from datetime import date, timedelta
+import time
+from datetime import date, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 import pandas as pd
@@ -105,6 +109,308 @@ BSE_INDEX_SYMBOLS = [
 
 # Create MCP server
 mcp = FastMCP("openalgo")
+
+# ---------------------------------------------------------------------------
+# Response envelope foundation (Phase 1.5 hardening)
+#
+# Every @mcp.tool decorated function is wrapped below so ALL tools (existing
+# and future) return the same standardized envelope:
+#   success envelope:  {success, timestamp, backend_version, mcp_version,
+#                       broker, exchange, latency_ms, market_status, data}
+#   error envelope:    {success:false, error_code, message, retryable,
+#                       timestamp, backend_version, mcp_version, broker,
+#                       exchange, latency_ms, market_status}
+# ---------------------------------------------------------------------------
+
+MCP_VERSION = "1.5.0"  # MCP surface contract version (bump on interface change)
+
+_START_TIME = time.monotonic()
+
+# Lightweight session context shared across tool calls (single-worker process).
+_SESSION_CONTEXT: dict[str, Any] = {
+    "broker": None,
+    "exchange": None,
+    "preferred_expiry": None,
+    "watchlist": None,
+    "portfolio": None,
+    "current_market": None,
+}
+
+# Lazy probe caches: key -> (timestamp, value). TTLs in seconds.
+_PROBE_CACHE: dict[str, tuple[float, Any]] = {}
+_PROBE_TTL = 600
+
+
+def _ist_now_iso() -> str:
+    """Return the current IST timestamp as an ISO string (seconds precision)."""
+    return datetime.now(ZoneInfo("Asia/Kolkata")).isoformat(timespec="seconds")
+
+
+def _normalize_symbol(symbol: str) -> str:
+    """Normalize a symbol to the canonical OpenAlgo format.
+
+    Accepts plain (NIFTY), option (NIFTY11AUG2624500CE) and futures
+    (NIFTY11AUG26FUT) forms. Returns the uppercased, space-free symbol.
+    Raises ValueError for empty or unrecognized symbols.
+    """
+    if not symbol or not isinstance(symbol, str):
+        raise ValueError("Symbol is required and must be a non-empty string")
+    cleaned = re.sub(r"\s+", "", symbol).upper()
+    if not cleaned:
+        raise ValueError("Symbol must be a non-empty string")
+    if not re.match(r"^[A-Z0-9]+$", cleaned):
+        raise ValueError(
+            f"Unrecognized symbol format: {symbol}. Use plain (NIFTY), "
+            "option (NIFTY11AUG2624500CE) or futures (NIFTY11AUG26FUT) form."
+        )
+    return cleaned
+
+
+def _map_error_code(text: str) -> tuple[str, bool]:
+    """Map an error message/status to a standardized (error_code, retryable)."""
+    lowered = text.lower()
+    if any(k in lowered for k in ("invalid api key", "unauthorized", "401")):
+        return "UNAUTHORIZED", False
+    if any(k in lowered for k in ("rate limit", "rate_limit", "429", "too many")):
+        return "RATE_LIMITED", True
+    if any(k in lowered for k in ("not found", "404")):
+        return "NOT_FOUND", False
+    if any(k in lowered for k in ("forbidden", "403")):
+        return "FORBIDDEN", False
+    if any(k in lowered for k in ("timeout", "timed out")):
+        return "TIMEOUT", True
+    if any(k in lowered for k in ("error calling", "connection", "network")):
+        return "NETWORK_ERROR", True
+    if any(k in lowered for k in ("internal server", "500", "backend", "traceback")):
+        return "BACKEND_ERROR", True
+    if any(k in lowered for k in ("validation", "invalid", "400", "required")):
+        return "INVALID_REQUEST", False
+    return "UNKNOWN_ERROR", False
+
+
+def _get_market_status() -> str:
+    """Derive market status from IST clock (no network call).
+
+    OPEN between 09:15 and 15:30 IST on weekdays, CLOSED otherwise.
+    """
+    now = datetime.now(ZoneInfo("Asia/Kolkata"))
+    if now.weekday() >= 5:
+        return "CLOSED"
+    seconds = now.hour * 3600 + now.minute * 60 + now.second
+    if 9 * 3600 + 15 * 60 <= seconds <= 15 * 3600 + 30 * 60:
+        return "OPEN"
+    return "CLOSED"
+
+
+def _get_backend_version() -> str:
+    """Return the backend platform version (lazy, cached TTL)."""
+    now = time.monotonic()
+    cached = _PROBE_CACHE.get("backend_version")
+    if cached and now - cached[0] < _PROBE_TTL:
+        return cached[1]
+    version = "unknown"
+    try:
+        from openalgo import __version__
+
+        version = str(__version__)
+    except Exception:
+        pass
+    _PROBE_CACHE["backend_version"] = (now, version)
+    return version
+
+
+def _get_broker() -> str:
+    """Return the active broker (session context -> env -> lazy probe -> unknown)."""
+    if _SESSION_CONTEXT.get("broker"):
+        return _SESSION_CONTEXT["broker"]
+    now = time.monotonic()
+    cached = _PROBE_CACHE.get("broker")
+    if cached and now - cached[0] < _PROBE_TTL:
+        return cached[1]
+    broker = os.getenv("OPENALGO_BROKER", "")
+    if not broker:
+        brokers = os.getenv("VALID_BROKERS", "")
+        broker = brokers.split(",")[0].strip() if brokers else ""
+    broker = broker or "unknown"
+    _PROBE_CACHE["broker"] = (now, broker)
+    return broker
+
+
+def _build_envelope(
+    data: Any, exchange: str | None = None, latency_ms: float | None = None
+) -> str:
+    """Wrap tool output in the standardized success envelope."""
+    return json.dumps(
+        {
+            "success": True,
+            "timestamp": _ist_now_iso(),
+            "backend_version": _get_backend_version(),
+            "mcp_version": MCP_VERSION,
+            "broker": _get_broker(),
+            "exchange": exchange,
+            "latency_ms": round(latency_ms, 3) if latency_ms is not None else None,
+            "market_status": _get_market_status(),
+            "data": data,
+        },
+        indent=2,
+        default=str,
+    )
+
+
+def _build_error(
+    error_code: str,
+    message: str,
+    retryable: bool = False,
+    exchange: str | None = None,
+    latency_ms: float | None = None,
+) -> str:
+    """Build the standardized error envelope."""
+    return json.dumps(
+        {
+            "success": False,
+            "error_code": error_code,
+            "message": message,
+            "retryable": retryable,
+            "timestamp": _ist_now_iso(),
+            "backend_version": _get_backend_version(),
+            "mcp_version": MCP_VERSION,
+            "broker": _get_broker(),
+            "exchange": exchange,
+            "latency_ms": round(latency_ms, 3) if latency_ms is not None else None,
+            "market_status": _get_market_status(),
+        },
+        indent=2,
+        default=str,
+    )
+
+
+# Result cache for expensive read tools. Keys are (tool_name, args_json,
+# kwargs_json); values are (expiry_ts, envelope_json). Production runs a
+# single eventlet worker, so no locking is needed. TTLs mirror each tool's
+# cache_ttl docstring; tools absent from the map never cache.
+_TOOL_CACHE: dict[tuple, tuple[float, str]] = {}
+_TOOL_CACHE_TTL: dict[str, float] = {
+    "market_snapshot": 30.0,
+    "option_snapshot": 30.0,
+    "company_snapshot": 60.0,
+    "portfolio_snapshot": 30.0,
+    "position_snapshot": 30.0,
+    "analyze": 30.0,
+    "analyze_market": 30.0,
+    "system_health": 30.0,
+    "get_capabilities": 300.0,
+    "get_gex_data": 30.0,
+    "get_iv_smile_data": 30.0,
+    "get_oi_data": 30.0,
+    "calculate_max_pain": 30.0,
+    "get_oi_profile_data": 30.0,
+    "get_straddle_chart_data": 30.0,
+    "get_vol_surface_data": 60.0,
+    "get_iv_chart_data": 30.0,
+    "get_gamma_density_data": 60.0,
+    "get_multi_strike_oi_data": 60.0,
+    "get_custom_straddle_simulation": 60.0,
+    "get_default_symbols": 300.0,
+    "get_support_resistance": 30.0,
+    "get_trend_snapshot": 30.0,
+    "get_momentum_snapshot": 30.0,
+    "get_volatility_snapshot": 30.0,
+    "screen_instruments": 60.0,
+    "multi_timeframe_analysis": 60.0,
+    "correlation_beta": 60.0,
+    "calculate_indicator": 30.0,
+    "get_historical_data": 60.0,
+}
+
+
+def _cache_key(fn_name: str, args, kwargs) -> tuple | None:
+    """Canonical cache key for a tool call, or None when unhashable."""
+    try:
+        arg_part = json.dumps(args, default=str)
+        kw_part = json.dumps(kwargs, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        return None
+    return (fn_name, arg_part, kw_part)
+
+
+def _tool_wrapper(fn):
+    """Wrap a tool function so its output becomes a standardized envelope."""
+
+    @functools.wraps(fn)
+    def wrapped(*args, **kwargs):
+        start = time.perf_counter()
+        exchange = kwargs.get("exchange") or _SESSION_CONTEXT.get("exchange")
+        ttl = _TOOL_CACHE_TTL.get(fn.__name__, 0.0)
+        key = None
+        if ttl > 0:
+            key = _cache_key(fn.__name__, args, kwargs)
+            if key is not None:
+                cached = _TOOL_CACHE.get(key)
+                if cached is not None and cached[0] > time.monotonic():
+                    return cached[1]
+        try:
+            result = fn(*args, **kwargs)
+        except Exception as e:
+            code, retryable = _map_error_code(str(e))
+            return _build_error(
+                code, str(e), retryable=retryable, exchange=exchange,
+                latency_ms=(time.perf_counter() - start) * 1000,
+            )
+        latency_ms = (time.perf_counter() - start) * 1000
+        if not isinstance(result, str):
+            result = json.dumps(result, indent=2, default=str)
+        stripped = result.lstrip()
+        if stripped.startswith("Error"):
+            code, retryable = _map_error_code(stripped)
+            return _build_error(
+                code, stripped, retryable=retryable, exchange=exchange,
+                latency_ms=latency_ms,
+            )
+        try:
+            parsed = json.loads(stripped)
+        except ValueError:
+            return _build_envelope(
+                {"message": stripped}, exchange=exchange, latency_ms=latency_ms
+            )
+        if isinstance(parsed, dict) and parsed.get("status") == "error":
+            message = str(parsed.get("message", "Operation failed"))
+            code, retryable = _map_error_code(message)
+            return _build_error(
+                code, message, retryable=retryable, exchange=exchange,
+                latency_ms=latency_ms,
+            )
+        envelope = _build_envelope(
+            parsed, exchange=exchange, latency_ms=latency_ms
+        )
+        if key is not None:
+            if len(_TOOL_CACHE) >= 2000:
+                _TOOL_CACHE.clear()
+            _TOOL_CACHE[key] = (time.monotonic() + ttl, envelope)
+        return envelope
+
+    return wrapped
+
+
+# Monkeypatch mcp.tool so every @mcp.tool() decorated function inherits the
+# envelope wrapper. FastMCP's tool() only supports the @mcp.tool() call style;
+# it returns a decorator, so we must invoke _original_tool(*args, **kwargs)
+# first and then apply the returned decorator to the wrapped function.
+_original_tool = mcp.tool
+
+
+def _mcp_tool_wrapper(fn=None, *args, **kwargs):
+    if fn is not None:
+        raise TypeError(
+            "The @tool decorator was used incorrectly. Did you forget to call it? Use @tool() instead of @tool"
+        )
+
+    def decorate(func):
+        return _original_tool(*args, **kwargs)(_tool_wrapper(func))
+
+    return decorate
+
+
+mcp.tool = _mcp_tool_wrapper
 
 
 def _to_json(payload: Any) -> str:
@@ -2208,6 +2514,85 @@ def _post_api_v1(path: str, payload: dict[str, Any]) -> str:
         return f"Error calling /api/v1{path}: {str(e)}"
 
 
+def _put_api_v1(path: str, payload: dict[str, Any]) -> str:
+    """PUT an API-key-authenticated request to an /api/v1 endpoint.
+
+    Mirrors _post_api_v1 for update endpoints that use PUT.
+
+    Args:
+        path: API endpoint path, e.g. "/strategyportfolio/3".
+        payload: Request body fields (apikey is injected automatically).
+
+    Returns:
+        JSON string of the endpoint response, or an error message.
+    """
+    url = f"{host.rstrip('/')}/api/v1/{path.lstrip('/')}"
+    body = {"apikey": api_key, **payload}
+    try:
+        with httpx.Client(timeout=30.0) as http:
+            r = http.put(url, json=body, headers={"Content-Type": "application/json"})
+            return json.dumps(r.json(), indent=2, default=str)
+    except Exception as e:
+        return f"Error calling /api/v1{path}: {str(e)}"
+
+
+def _delete_api_v1(path: str) -> str:
+    """DELETE an API-key-authenticated request to an /api/v1 endpoint.
+
+    Mirrors _post_api_v1 for delete endpoints. The apikey travels in the
+    JSON body so the platform REST layer can authenticate the request.
+
+    Args:
+        path: API endpoint path, e.g. "/strategy/3".
+
+    Returns:
+        JSON string of the endpoint response, or an error message.
+    """
+    url = f"{host.rstrip('/')}/api/v1/{path.lstrip('/')}"
+    body = {"apikey": api_key}
+    try:
+        with httpx.Client(timeout=30.0) as http:
+            r = http.delete(url, json=body, headers={"Content-Type": "application/json"})
+            return json.dumps(r.json(), indent=2, default=str)
+    except Exception as e:
+        return f"Error calling /api/v1{path}: {str(e)}"
+
+
+def _post_webhook(webhook_id: str, payload: dict[str, Any]) -> str:
+    """POST a webhook trigger for a strategy.
+
+    The webhook route is keyed by the strategy webhook_id (not the API
+    key), so no apikey is injected here.
+
+    Args:
+        webhook_id: Strategy webhook ID (UUID).
+        payload: Webhook body as sent by the trading platform.
+
+    Returns:
+        JSON string of the endpoint response, or an error message.
+    """
+    url = f"{host.rstrip('/')}/strategy/webhook/{webhook_id}"
+    try:
+        with httpx.Client(timeout=30.0) as http:
+            r = http.post(url, json=payload, headers={"Content-Type": "application/json"})
+            return json.dumps(r.json(), indent=2, default=str)
+    except Exception as e:
+        return f"Error calling webhook {webhook_id}: {str(e)}"
+
+
+def _parse_json_response(response: str) -> dict[str, Any]:
+    """Parse a JSON string response into a dict, or return an empty dict."""
+    try:
+        return json.loads(response)
+    except Exception:
+        return {}
+
+
+def _normalize_expiry_display(expiry_display: str) -> str:
+    """Convert an expiry display value (e.g., 11-AUG-26) to DDMMMYY (11AUG26)."""
+    return expiry_display.upper().replace("-", "")
+
+
 @mcp.tool()
 def get_gex_data(
     underlying: str,
@@ -2527,6 +2912,2140 @@ def get_custom_straddle_simulation(
             "lot_size": lot_size,
             "lots": lots,
         },
+    )
+
+
+@mcp.tool()
+def get_gamma_density_data(
+    underlying: str,
+    exchange: str,
+    expiry_date: str,
+    interest_rate: float | None = None,
+) -> str:
+    """
+    Get Gamma Density data for an underlying/expiry.
+
+    Computes the per-strike gamma density curve, ATM/one/two sigma bands,
+    and peak gamma strikes from the option chain and Black-76 greeks.
+
+    Args:
+        underlying: Underlying symbol (e.g., NIFTY, BANKNIFTY, RELIANCE).
+        exchange: Exchange (NSE_INDEX, NSE, NFO, BSE_INDEX, BSE, BFO, MCX, CDS).
+        expiry_date: Expiry date in DDMMMYY format (e.g., 28NOV25).
+        interest_rate: Optional risk-free interest rate override as a fraction (e.g., 0.065).
+
+    Returns:
+        JSON with spot/forward price, ATM IV, sigma bands and the gamma density chain.
+    """
+    payload: dict[str, Any] = {
+        "underlying": underlying.upper(),
+        "exchange": exchange.upper(),
+        "expiry_date": expiry_date.upper(),
+    }
+    if interest_rate is not None:
+        payload["interest_rate"] = interest_rate
+    return _post_api_v1("/gammadensity", payload)
+
+
+@mcp.tool()
+def get_arbitrage_universe(
+    exchanges: list[str] | None = None,
+) -> str:
+    """
+    Get the arbitrage universe of near/far futures pairs.
+
+    Lists futures pairs with the same underlying across nearby and far
+    expiries, built from the master contract database.
+
+    Args:
+        exchanges: Optional list of exchanges to scan (NFO, MCX, BFO, CDS). Defaults to NFO and MCX.
+
+    Returns:
+        JSON with arbitrage pairs, symbols and pair counts per exchange.
+    """
+    payload: dict[str, Any] = {}
+    if exchanges:
+        payload["exchanges"] = [e.upper() for e in exchanges]
+    return _post_api_v1("/arbitrage", payload)
+
+
+@mcp.tool()
+def get_multi_strike_oi_data(
+    underlying: str,
+    exchange: str,
+    legs: list[dict],
+    interval: str = "1m",
+    days: int = 5,
+) -> str:
+    """
+    Get Open Interest data for multiple option strikes of an underlying.
+
+    Tracks OI history for each provided option leg over an intraday or
+    multi-day window so option activity can be compared across strikes.
+
+    Args:
+        underlying: Underlying symbol (e.g., NIFTY, BANKNIFTY).
+        exchange: Exchange (NSE_INDEX, NSE, NFO, BSE_INDEX, BSE, BFO, MCX, CDS).
+        legs: List of option legs, each with symbol, exchange, side, strike, optionType and expiry.
+        interval: Candle interval (default 1m).
+        days: Number of days of history to load (default 5).
+
+    Returns:
+        JSON with the underlying LTP, OI series and per-leg OI series.
+    """
+    return _post_api_v1(
+        "/multistrikeoi",
+        {
+            "underlying": underlying.upper(),
+            "exchange": exchange.upper(),
+            "legs": legs,
+            "interval": interval,
+            "days": days,
+        },
+    )
+
+
+@mcp.tool()
+def create_strategy(
+    platform: str,
+    name: str,
+    strategy_type: str = "intraday",
+    trading_mode: str = "LONG",
+    start_time: str | None = None,
+    end_time: str | None = None,
+    squareoff_time: str | None = None,
+) -> str:
+    """
+    Create a new trading strategy.
+
+    Registers a strategy that external platforms (TradingView, Chartink,
+    etc.) can trigger via its webhook. Intraday strategies get a
+    scheduled square-off at squareoff_time.
+
+    Args:
+        platform: Platform type (tradingview, chartink, etc.).
+        name: Strategy name.
+        strategy_type: intraday or positional (default intraday).
+        trading_mode: LONG, SHORT or BOTH (default LONG).
+        start_time: Entry window start in HH:MM 24h format.
+        end_time: Entry window end in HH:MM 24h format.
+        squareoff_time: Square-off time in HH:MM 24h format.
+
+    Returns:
+        JSON with the new strategy id and webhook id.
+    """
+    payload: dict[str, Any] = {
+        "platform": platform,
+        "name": name,
+        "strategy_type": strategy_type,
+        "trading_mode": trading_mode,
+    }
+    if start_time:
+        payload["start_time"] = start_time
+    if end_time:
+        payload["end_time"] = end_time
+    if squareoff_time:
+        payload["squareoff_time"] = squareoff_time
+    return _post_api_v1("/strategy", payload)
+
+
+@mcp.tool()
+def list_strategies() -> str:
+    """
+    List all strategies for the authenticated user.
+
+    Returns:
+        JSON array of strategies with webhook ids and trading windows.
+    """
+    return _post_api_v1("/strategy/list", {})
+
+
+@mcp.tool()
+def get_strategy(strategy_id: int) -> str:
+    """
+    Get a single strategy with its symbol mappings.
+
+    Args:
+        strategy_id: Numeric strategy id.
+
+    Returns:
+        JSON with the strategy details and its symbol mappings.
+    """
+    return _post_api_v1(f"/strategy/{strategy_id}", {})
+
+
+@mcp.tool()
+def toggle_strategy(strategy_id: int) -> str:
+    """
+    Toggle a strategy between active and inactive.
+
+    Activating an intraday strategy re-schedules its square-off;
+    deactivating removes the scheduled job.
+
+    Args:
+        strategy_id: Numeric strategy id.
+
+    Returns:
+        JSON with the new is_active state.
+    """
+    return _post_api_v1(f"/strategy/{strategy_id}/toggle", {})
+
+
+@mcp.tool()
+def delete_strategy(strategy_id: int) -> str:
+    """
+    Delete a strategy and its symbol mappings.
+
+    Args:
+        strategy_id: Numeric strategy id.
+
+    Returns:
+        JSON confirming deletion.
+    """
+    return _delete_api_v1(f"/strategy/{strategy_id}")
+
+
+@mcp.tool()
+def add_strategy_symbols(strategy_id: int, symbols: list[dict]) -> str:
+    """
+    Add symbol mappings to a strategy.
+
+    Each mapping must carry symbol, exchange, quantity and product_type.
+
+    Args:
+        strategy_id: Numeric strategy id.
+        symbols: List of dicts with symbol, exchange, quantity and product_type (MIS/CNC).
+
+    Returns:
+        JSON confirming the mappings were added.
+    """
+    return _post_api_v1(f"/strategy/{strategy_id}/symbols", {"symbols": symbols})
+
+
+@mcp.tool()
+def remove_strategy_symbol(strategy_id: int, mapping_id: int) -> str:
+    """
+    Remove a symbol mapping from a strategy.
+
+    Args:
+        strategy_id: Numeric strategy id.
+        mapping_id: Numeric symbol mapping id.
+
+    Returns:
+        JSON confirming the mapping was removed.
+    """
+    return _delete_api_v1(f"/strategy/{strategy_id}/symbol/{mapping_id}")
+
+
+@mcp.tool()
+def update_strategy_times(
+    strategy_id: int,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    squareoff_time: str | None = None,
+) -> str:
+    """
+    Update the trading windows of a strategy.
+
+    Args:
+        strategy_id: Numeric strategy id.
+        start_time: Entry window start in HH:MM 24h format.
+        end_time: Entry window end in HH:MM 24h format.
+        squareoff_time: Square-off time in HH:MM 24h format.
+
+    Returns:
+        JSON confirming the times were updated.
+    """
+    payload: dict[str, Any] = {}
+    if start_time:
+        payload["start_time"] = start_time
+    if end_time:
+        payload["end_time"] = end_time
+    if squareoff_time:
+        payload["squareoff_time"] = squareoff_time
+    return _post_api_v1(f"/strategy/{strategy_id}/times", payload)
+
+
+@mcp.tool()
+def trigger_strategy_webhook(webhook_id: str, payload: dict) -> str:
+    """
+    Trigger a strategy webhook with a signal payload.
+
+    Simulates a TradingView/Chartink alert: the platform validates the
+    symbol/action against the strategy and queues the order.
+
+    Args:
+        webhook_id: Strategy webhook id (UUID).
+        payload: Webhook body with symbol, action and optional position_size.
+
+    Returns:
+        JSON confirming the order was queued, or the platform error.
+    """
+    return _post_webhook(webhook_id, payload)
+
+
+@mcp.tool()
+def list_strategy_portfolio(watchlist: str | None = None) -> str:
+    """
+    List strategy portfolio entries, optionally filtered by watchlist.
+
+    Args:
+        watchlist: Optional watchlist filter (mytrades or simulation).
+
+    Returns:
+        JSON array of portfolio entries with legs and notes.
+    """
+    payload: dict[str, Any] = {}
+    if watchlist:
+        payload["watchlist"] = watchlist
+    return _post_api_v1("/strategyportfolio/list", payload)
+
+
+@mcp.tool()
+def get_strategy_portfolio(entry_id: int) -> str:
+    """
+    Get a single strategy portfolio entry.
+
+    Args:
+        entry_id: Numeric portfolio entry id.
+
+    Returns:
+        JSON with the portfolio entry and its legs.
+    """
+    return _post_api_v1(f"/strategyportfolio/{entry_id}", {})
+
+
+@mcp.tool()
+def save_strategy_portfolio(
+    name: str,
+    watchlist: str,
+    underlying: str,
+    exchange: str,
+    legs: list[dict],
+    expiry: str | None = None,
+    notes: str | None = None,
+) -> str:
+    """
+    Create a new strategy portfolio entry.
+
+    Args:
+        name: Portfolio entry name.
+        watchlist: mytrades or simulation.
+        underlying: Underlying symbol (e.g., NIFTY, BANKNIFTY).
+        exchange: Exchange (NSE_INDEX, NSE, NFO, BSE_INDEX, BSE, BFO, MCX, CDS).
+        legs: List of strategy leg definitions (option or future legs).
+        expiry: Optional expiry date in DDMMMYY format (e.g., 28NOV25).
+        notes: Optional free-text notes.
+
+    Returns:
+        JSON with the created portfolio entry.
+    """
+    payload: dict[str, Any] = {
+        "name": name,
+        "watchlist": watchlist,
+        "underlying": underlying.upper(),
+        "exchange": exchange.upper(),
+        "legs": legs,
+    }
+    if expiry:
+        payload["expiry"] = expiry.upper()
+    if notes:
+        payload["notes"] = notes
+    return _post_api_v1("/strategyportfolio", payload)
+
+
+@mcp.tool()
+def update_strategy_portfolio(
+    entry_id: int,
+    name: str,
+    watchlist: str,
+    underlying: str,
+    exchange: str,
+    legs: list[dict],
+    expiry: str | None = None,
+    notes: str | None = None,
+) -> str:
+    """
+    Update an existing strategy portfolio entry.
+
+    Args:
+        entry_id: Numeric portfolio entry id.
+        name: Portfolio entry name.
+        watchlist: mytrades or simulation.
+        underlying: Underlying symbol (e.g., NIFTY, BANKNIFTY).
+        exchange: Exchange (NSE_INDEX, NSE, NFO, BSE_INDEX, BSE, BFO, MCX, CDS).
+        legs: List of strategy leg definitions (option or future legs).
+        expiry: Optional expiry date in DDMMMYY format (e.g., 28NOV25).
+        notes: Optional free-text notes.
+
+    Returns:
+        JSON with the updated portfolio entry.
+    """
+    payload: dict[str, Any] = {
+        "name": name,
+        "watchlist": watchlist,
+        "underlying": underlying.upper(),
+        "exchange": exchange.upper(),
+        "legs": legs,
+    }
+    if expiry:
+        payload["expiry"] = expiry.upper()
+    if notes:
+        payload["notes"] = notes
+    return _put_api_v1(f"/strategyportfolio/{entry_id}", payload)
+
+
+@mcp.tool()
+def delete_strategy_portfolio(entry_id: int) -> str:
+    """
+    Delete a strategy portfolio entry.
+
+    Args:
+        entry_id: Numeric portfolio entry id.
+
+    Returns:
+        JSON confirming deletion.
+    """
+    return _delete_api_v1(f"/strategyportfolio/{entry_id}")
+
+
+@mcp.tool()
+def analyze_market(
+    underlying: str,
+    exchange: str = "NSE_INDEX",
+    expiry_date: str | None = None,
+) -> str:
+    """
+    Get a consolidated snapshot of an underlying for market analysis.
+
+    Aggregates quotes, option chain, GEX, max pain and IV smile into a
+    single JSON payload for a high-level view of an expiry.
+
+    Args:
+        underlying: Underlying symbol (e.g., NIFTY, BANKNIFTY, RELIANCE).
+        exchange: Exchange (NSE_INDEX, NSE, NFO, BSE_INDEX, BSE, BFO, MCX, CDS).
+        expiry_date: Optional expiry in DDMMMYY format (e.g., 28NOV25). If omitted, resolved from the exchange.
+
+    Returns:
+        JSON with quotes, option chain, GEX, max pain and IV smile for the underlying.
+    """
+    resolved_expiry = expiry_date.upper() if expiry_date else None
+
+    if not resolved_expiry:
+        expiry_response = _post_api_v1(
+            "/expiry",
+            {
+                "symbol": underlying.upper(),
+                "exchange": exchange.upper(),
+                "instrumenttype": "options",
+            },
+        )
+        expiry_data = _parse_json_response(expiry_response)
+        expiry_dates = expiry_data.get("expiry_dates") or expiry_data.get("data") or []
+        if not expiry_dates:
+            return json.dumps(
+                {
+                    "status": "error",
+                    "message": "Could not resolve expiry date from exchange. Provide expiry_date in DDMMMYY format (e.g., 28NOV25).",
+                    "expiry_response": expiry_response,
+                },
+                indent=2,
+            )
+        # Display format is DD-MMM-YY (e.g., 11-AUG-26); convert to DDMMMYY.
+        resolved_expiry = _normalize_expiry_display(str(expiry_dates[0]))
+
+    snapshot: dict[str, Any] = {
+        "status": "success",
+        "underlying": underlying.upper(),
+        "exchange": exchange.upper(),
+        "expiry_date": resolved_expiry,
+    }
+
+    quotes_response = _post_api_v1(
+        "/quotes",
+        {"symbol": underlying.upper(), "exchange": exchange.upper()},
+    )
+    quotes_data = _parse_json_response(quotes_response)
+    if quotes_data.get("status") == "success":
+        snapshot["quotes"] = quotes_data
+    else:
+        snapshot["quotes_error"] = quotes_response
+
+    option_chain_response = _post_api_v1(
+        "/optionchain",
+        {
+            "underlying": underlying.upper(),
+            "exchange": exchange.upper(),
+            "expiry_date": resolved_expiry,
+            "strike_count": 10,
+        },
+    )
+    chain_data = _parse_json_response(option_chain_response)
+    if chain_data.get("status") == "success":
+        snapshot["option_chain"] = chain_data
+    else:
+        snapshot["option_chain_error"] = option_chain_response
+
+    gex_response = _post_api_v1(
+        "/gex",
+        {
+            "underlying": underlying.upper(),
+            "exchange": exchange.upper(),
+            "expiry_date": resolved_expiry,
+        },
+    )
+    gex_data = _parse_json_response(gex_response)
+    if gex_data.get("status") == "success":
+        snapshot["gex"] = gex_data
+    else:
+        snapshot["gex_error"] = gex_response
+
+    max_pain_response = _post_api_v1(
+        "/oitracker/maxpain",
+        {
+            "underlying": underlying.upper(),
+            "exchange": exchange.upper(),
+            "expiry_date": resolved_expiry,
+        },
+    )
+    max_pain_data = _parse_json_response(max_pain_response)
+    if max_pain_data.get("status") == "success":
+        snapshot["max_pain"] = max_pain_data
+    else:
+        snapshot["max_pain_error"] = max_pain_response
+
+    iv_smile_response = _post_api_v1(
+        "/ivsmile",
+        {
+            "underlying": underlying.upper(),
+            "exchange": exchange.upper(),
+            "expiry_date": resolved_expiry,
+        },
+    )
+    iv_smile_data = _parse_json_response(iv_smile_response)
+    if iv_smile_data.get("status") == "success":
+        snapshot["iv_smile"] = iv_smile_data
+    else:
+        snapshot["iv_smile_error"] = iv_smile_response
+
+    return json.dumps(snapshot, indent=2, default=str)
+
+
+# ---------------------------------------------------------------------------
+# Phase 1.5 foundation tools: session context, snapshots, capabilities,
+# health, and risk guardrails. These aggregate lower-level tools and become
+# the default entry points for AI agents.
+# ---------------------------------------------------------------------------
+
+
+def _quick_post(path: str, payload: dict[str, Any], timeout: float = 5.0) -> str:
+    """POST to the backend with a short timeout (used for health probes)."""
+    if not host:
+        return "Error calling {path}: host is not configured"
+    url = f"{host.rstrip('/')}/api/v1/{path.lstrip('/')}"
+    body = {"apikey": api_key, **payload}
+    try:
+        with httpx.Client(timeout=timeout) as http:
+            r = http.post(url, json=body, headers={"Content-Type": "application/json"})
+            return json.dumps(r.json(), indent=2, default=str)
+    except Exception as e:
+        return f"Error calling /api/v1{path}: {str(e)}"
+
+
+def _snapshot_get(path: str, **payload: Any) -> dict[str, Any]:
+    """Call a backend endpoint and return its parsed data dict (or error)."""
+    try:
+        response = _post_api_v1(path, payload)
+        parsed = _parse_json_response(response)
+        if isinstance(parsed, dict) and parsed.get("status") == "success":
+            data = parsed.get("data")
+            if isinstance(data, dict):
+                return data
+            if data is not None:
+                return {"data": data}
+            # Analytics endpoints have no top-level 'data' key; pass their
+            # full payload (chain, pain_data, atm_strike, ...) through.
+            return parsed
+        return parsed if isinstance(parsed, dict) else {"response": response}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: market intelligence data layer.
+#
+# Snapshot tools below are the preferred interface for AI agents. Every
+# section is normalized to a stable MCP schema (no raw provider field names)
+# and carries provenance metadata: source (backend endpoint), provider
+# (broker/vendor), fetched_at (IST ISO), latency_ms and freshness
+# (live | cached | derived). Provider-specific payloads (e.g. broker funds
+# keys) are never used by summaries; they are passed through explicitly
+# tagged as provider_specific.
+# ---------------------------------------------------------------------------
+
+
+def _num(value: Any, default: float = 0.0) -> float:
+    """Defensively convert a provider field to float (may be str/None)."""
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _snapshot_section(
+    source: str, payload: dict[str, Any], freshness: str
+) -> dict[str, Any]:
+    """Fetch a backend section and wrap it with provenance metadata."""
+    start = time.perf_counter()
+    data = _snapshot_get(source, **payload)
+    latency_ms = (time.perf_counter() - start) * 1000
+    return {
+        "source": source,
+        "provider": _get_broker(),
+        "fetched_at": _ist_now_iso(),
+        "latency_ms": round(latency_ms, 1),
+        "freshness": freshness,
+        "data": data,
+    }
+
+
+def _section_data(section: dict[str, Any]) -> dict[str, Any]:
+    """Return the data payload of a snapshot section (or {} on error)."""
+    if not isinstance(section, dict):
+        return {}
+    data = section.get("data")
+    return data if isinstance(data, dict) else {}
+
+
+# /expiry validates exchange against derivative venues only; index and equity
+# exchanges map to their derivative venue for option-expiry resolution.
+_DERIVATIVE_EXCHANGE_MAP = {
+    "NSE_INDEX": "NFO",
+    "NSE": "NFO",
+    "BSE_INDEX": "BFO",
+    "BSE": "BFO",
+}
+
+
+def _resolve_expiry(
+    underlying: str, exchange: str, expiry_date: str | None
+) -> str | None:
+    """Resolve the nearest expiry in DDMMMYY format (backend when omitted)."""
+    if expiry_date:
+        return _normalize_expiry_display(expiry_date)
+    derivative_exchange = _DERIVATIVE_EXCHANGE_MAP.get(exchange, exchange)
+    response = _post_api_v1(
+        "/expiry",
+        {
+            "symbol": underlying,
+            "exchange": derivative_exchange,
+            "instrumenttype": "options",
+        },
+    )
+    expiry_data = _parse_json_response(response)
+    dates = (
+        expiry_data.get("expiry_dates")
+        if isinstance(expiry_data, dict)
+        else None
+    ) or (
+        expiry_data.get("data") if isinstance(expiry_data, dict) else None
+    ) or []
+    if dates:
+        return _normalize_expiry_display(str(dates[0]))
+    return None
+
+
+_FUNDS_KEY_MAP = {
+    "availablecash": "cash",
+    "available_cash": "cash",
+    "cash": "cash",
+    "availablemargin": "available_margin",
+    "available_margin": "available_margin",
+    "usedmargin": "used_margin",
+    "used_margin": "used_margin",
+    "marginused": "used_margin",
+    "intradaypayin": "intraday_payin",
+    "adhocmargin": "adhoc_margin",
+    "adhoc_margin": "adhoc_margin",
+    "collateral": "collateral",
+    "collateralvalue": "collateral_value",
+    "payin": "payin",
+    "payout": "payout",
+    "openingbalance": "opening_balance",
+    "opening_balance": "opening_balance",
+    "closingbalance": "closing_balance",
+    "closing_balance": "closing_balance",
+}
+
+
+def _normalize_funds(funds: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Map broker-specific funds keys to stable names; remainder is provider-specific."""
+    normalized: dict[str, Any] = {}
+    provider_specific: dict[str, Any] = {}
+    for key, value in funds.items():
+        stable = _FUNDS_KEY_MAP.get(str(key).lower())
+        if stable:
+            normalized.setdefault(stable, value)
+        else:
+            provider_specific[key] = value
+    return normalized, provider_specific
+
+
+def _bias_hint(pcr_oi: Any, net_gex: Any) -> str:
+    """Derive a plain-language positioning note from PCR and net GEX (best effort)."""
+    notes: list[str] = []
+    if isinstance(net_gex, (int, float)):
+        if net_gex < 0:
+            notes.append(
+                "negative net GEX (dealers short gamma, volatility expansion likely)"
+            )
+        else:
+            notes.append("positive net GEX (dealers long gamma, mean-reverting tape)")
+    if isinstance(pcr_oi, (int, float)):
+        if pcr_oi >= 1.2:
+            notes.append("elevated PCR (defensive put positioning)")
+        elif pcr_oi <= 0.8:
+            notes.append("low PCR (risk-on call positioning)")
+    return "; ".join(notes) if notes else "neutral"
+
+
+def _top_oi_rows(chain: Any, side: str, limit: int = 5) -> list[dict[str, Any]]:
+    """Return the top-OI strikes for one side of an OI chain (best effort)."""
+    if not isinstance(chain, list):
+        return []
+    rows: list[tuple[float, Any]] = []
+    for row in chain:
+        if not isinstance(row, dict):
+            continue
+        strike = row.get("strike")
+        oi = _num(row.get(f"{side}_oi"))
+        if oi > 0 and strike is not None:
+            rows.append((oi, strike))
+    rows.sort(reverse=True)
+    return [{"strike": strike, "oi": int(oi)} for oi, strike in rows[:limit]]
+
+
+def _quote_summary(quote: dict[str, Any]) -> dict[str, Any]:
+    """Derive a compact quote summary (best effort, missing fields -> 0)."""
+    ltp = _num(quote.get("ltp"))
+    prev_close = _num(quote.get("prev_close"))
+    change = ltp - prev_close if prev_close else 0.0
+    return {
+        "ltp": ltp,
+        "prev_close": prev_close,
+        "change": round(change, 2),
+        "change_pct": round(change / prev_close * 100, 2) if prev_close else 0.0,
+        "day_range": {"low": _num(quote.get("low")), "high": _num(quote.get("high"))},
+        "volume": _num(quote.get("volume")),
+        "oi": _num(quote.get("oi")),
+    }
+
+
+def _summarize_market(
+    quote_section: dict[str, Any],
+    chain_section: dict[str, Any],
+    gex_section: dict[str, Any],
+    max_pain_section: dict[str, Any],
+    iv_smile_section: dict[str, Any],
+) -> dict[str, Any]:
+    """Derive a compact market summary from fetched sections (best effort)."""
+    quote = _section_data(quote_section)
+    chain = _section_data(chain_section)
+    gex = _section_data(gex_section)
+    max_pain = _section_data(max_pain_section)
+    iv_smile = _section_data(iv_smile_section)
+    summary = _quote_summary(quote)
+    summary["underlying"] = chain.get("underlying") or gex.get("underlying")
+    summary["spot"] = _num(chain.get("underlying_ltp")) or summary["ltp"]
+    summary["atm_strike"] = chain.get("atm_strike") or gex.get("atm_strike")
+    summary["max_pain_strike"] = max_pain.get("max_pain_strike")
+    summary["pcr_oi"] = gex.get("pcr_oi") or max_pain.get("pcr_oi")
+    summary["net_gex"] = gex.get("total_net_gex")
+    summary["atm_iv"] = iv_smile.get("atm_iv")
+    summary["iv_skew"] = iv_smile.get("skew")
+    summary["bias_hint"] = _bias_hint(summary["pcr_oi"], summary["net_gex"])
+    summary["note"] = "Derived by MCP from the sections above; not a trading signal."
+    return summary
+
+
+def _summarize_positioning(
+    oi_section: dict[str, Any],
+    max_pain_section: dict[str, Any],
+    gex_section: dict[str, Any],
+    iv_smile_section: dict[str, Any],
+) -> dict[str, Any]:
+    """Derive a compact options positioning summary (best effort)."""
+    oi = _section_data(oi_section)
+    max_pain = _section_data(max_pain_section)
+    gex = _section_data(gex_section)
+    iv_smile = _section_data(iv_smile_section)
+    return {
+        "underlying": oi.get("underlying") or gex.get("underlying"),
+        "spot": _num(oi.get("spot_price")) or _num(gex.get("spot_price")),
+        "atm_strike": oi.get("atm_strike") or gex.get("atm_strike"),
+        "max_pain_strike": max_pain.get("max_pain_strike"),
+        "pcr_oi": oi.get("pcr_oi"),
+        "pcr_volume": oi.get("pcr_volume"),
+        "total_ce_oi": oi.get("total_ce_oi"),
+        "total_pe_oi": oi.get("total_pe_oi"),
+        "net_gex": gex.get("total_net_gex"),
+        "atm_iv": iv_smile.get("atm_iv"),
+        "iv_skew": iv_smile.get("skew"),
+        "top_oi_strikes": {
+            "ce": _top_oi_rows(oi.get("chain"), "ce"),
+            "pe": _top_oi_rows(oi.get("chain"), "pe"),
+        },
+        "bias_hint": _bias_hint(oi.get("pcr_oi"), gex.get("total_net_gex")),
+        "note": (
+            "Derived by MCP from OI, max pain, GEX and IV smile sections; "
+            "not a trading signal."
+        ),
+    }
+
+
+def _history_summary(history_section: dict[str, Any]) -> dict[str, Any]:
+    """Derive trend/range/volume stats from a history section (best effort)."""
+    data = _section_data(history_section)
+    candles = data.get("data") if isinstance(data, dict) else None
+    if not isinstance(candles, list) or not candles:
+        return {"candles": 0, "note": "History unavailable"}
+    closes: list[float] = []
+    volumes: list[float] = []
+    for candle in candles:
+        if not isinstance(candle, dict):
+            continue
+        try:
+            closes.append(float(candle["close"]))
+            volumes.append(float(candle.get("volume") or 0))
+        except (TypeError, ValueError, KeyError):
+            continue
+    if not closes:
+        return {"candles": len(candles), "note": "Could not derive prices from history"}
+    first, last = closes[0], closes[-1]
+    return {
+        "candles": len(candles),
+        "first_close": round(first, 2),
+        "last_close": round(last, 2),
+        "period_change_pct": round((last - first) / first * 100, 2) if first else 0.0,
+        "period_high": round(max(closes), 2),
+        "period_low": round(min(closes), 2),
+        "avg_volume": int(sum(volumes) / len(volumes)) if volumes else 0,
+    }
+
+
+_HISTORY_CACHE_TTL_SECONDS = 3600
+
+
+def _company_history_section(symbol: str, exchange: str) -> dict[str, Any]:
+    """Read the Upstox-direct history cache written by scripts/fetch_upstox_data.py."""
+    start = time.perf_counter()
+    cache_file = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "mcp",
+        "cache",
+        "company_history",
+        f"{symbol}_{exchange}.json",
+    )
+    candles: list[Any] = []
+    fetched_at: str | None = None
+    note: str | None = None
+    if os.path.exists(cache_file):
+        try:
+            with open(cache_file, encoding="utf-8") as fh:
+                cache = json.load(fh)
+            fetched_at = cache.get("fetched_at")
+            raw_candles = cache.get("candles")
+            if isinstance(raw_candles, list):
+                candles = raw_candles
+        except (OSError, ValueError) as exc:
+            note = f"Could not read history cache: {exc}"
+    else:
+        note = (
+            f"No cached history for {symbol}. Run: "
+            f"scripts/fetch_upstox_data.py --symbol {symbol} --exchange {exchange}"
+        )
+
+    freshness = "stale"
+    if fetched_at:
+        try:
+            parsed = datetime.fromisoformat(fetched_at)
+            if time.time() - parsed.timestamp() <= _HISTORY_CACHE_TTL_SECONDS:
+                freshness = "cached"
+        except ValueError:
+            freshness = "stale"
+
+    latency_ms = (time.perf_counter() - start) * 1000
+    data: dict[str, Any] = {"data": candles, "candle_count": len(candles)}
+    if note:
+        data["note"] = note
+    return {
+        "source": "upstox:historical-candle (file cache)",
+        "provider": _get_broker(),
+        "fetched_at": fetched_at or _ist_now_iso(),
+        "latency_ms": round(latency_ms, 1),
+        "freshness": freshness,
+        "data": data,
+    }
+
+
+def _read_upstox_cache(
+    cache_kind: str, file_name: str, source: str, fetch_hint: str
+) -> dict[str, Any]:
+    """Read one Upstox-direct cache file and return a provenance envelope.
+
+    Mirrors _company_history_section for the news/fundamentals caches written by
+    scripts/fetch_upstox_data.py. Freshness is "cached" while the file is
+    younger than _HISTORY_CACHE_TTL_SECONDS, "stale" otherwise (or when the file
+    is missing or unreadable, in which case data.note explains how to populate
+    it). The envelope data carries the payload minus fetched_at.
+
+    Args:
+        cache_kind: Cache subdirectory under mcp/cache (e.g. "company_news").
+        file_name: Cache file name (e.g. "RELIANCE_NSE.json").
+        source: Provenance source label for the envelope.
+        fetch_hint: data.note text used when the cache file is missing.
+    """
+    start = time.perf_counter()
+    cache_file = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "mcp",
+        "cache",
+        cache_kind,
+        file_name,
+    )
+    payload: dict[str, Any] = {}
+    fetched_at: str | None = None
+    note: str | None = None
+    if os.path.exists(cache_file):
+        try:
+            with open(cache_file, encoding="utf-8") as fh:
+                loaded = json.load(fh)
+            if isinstance(loaded, dict):
+                payload = loaded
+            fetched_at = payload.get("fetched_at")
+        except (OSError, ValueError) as exc:
+            note = f"Could not read cache: {exc}"
+    else:
+        note = fetch_hint
+
+    freshness = "stale"
+    if fetched_at:
+        try:
+            parsed = datetime.fromisoformat(fetched_at)
+            if time.time() - parsed.timestamp() <= _HISTORY_CACHE_TTL_SECONDS:
+                freshness = "cached"
+        except ValueError:
+            freshness = "stale"
+
+    latency_ms = (time.perf_counter() - start) * 1000
+    data: dict[str, Any] = {
+        key: value for key, value in payload.items() if key != "fetched_at"
+    }
+    if note:
+        data["note"] = note
+    return {
+        "source": source,
+        "provider": _get_broker(),
+        "fetched_at": fetched_at or _ist_now_iso(),
+        "latency_ms": round(latency_ms, 1),
+        "freshness": freshness,
+        "data": data,
+    }
+
+
+def _company_news_section(symbol: str, exchange: str) -> dict[str, Any]:
+    """Read the Upstox-direct news cache (mcp/cache/company_news/)."""
+    return _read_upstox_cache(
+        "company_news",
+        f"{symbol}_{exchange}.json",
+        "upstox:news (file cache)",
+        (
+            f"No cached news for {symbol}. Run: scripts/fetch_upstox_data.py "
+            f"--symbol {symbol} --exchange {exchange} --mode news"
+        ),
+    )
+
+
+def _company_fundamentals_section(
+    field: str, symbol: str, exchange: str
+) -> dict[str, Any]:
+    """Read one Upstox-direct fundamentals cache (mcp/cache/company_fundamentals/).
+
+    Args:
+        field: Fundamentals field: corporate-actions, share-holdings or
+            income-statement.
+        symbol: Company symbol.
+        exchange: Exchange (default NSE).
+    """
+    return _read_upstox_cache(
+        "company_fundamentals",
+        f"{field}_{symbol}_{exchange}.json",
+        f"upstox:{field} (file cache)",
+        (
+            f"No cached {field} for {symbol}. Run: scripts/fetch_upstox_data.py "
+            f"--symbol {symbol} --exchange {exchange} --mode {field}"
+        ),
+    )
+
+
+def _summarize_news(news_section: dict[str, Any] | None) -> dict[str, Any]:
+    """Condense the news cache into the top headlines (best effort)."""
+    data = _section_data(news_section) if news_section else {}
+    articles = data.get("news") if isinstance(data, dict) else None
+    if not isinstance(articles, list) or not articles:
+        return {
+            "available": False,
+            "note": data.get("note") if isinstance(data, dict) else None
+            or "No news cached. Run: scripts/fetch_upstox_data.py --mode news",
+        }
+    headlines = [
+        {
+            "heading": article.get("heading"),
+            "published_time": article.get("published_time"),
+        }
+        for article in articles[:3]
+        if isinstance(article, dict)
+    ]
+    return {"available": True, "count": len(articles), "headlines": headlines}
+
+
+def _shareholding_summary(raw: Any) -> dict[str, Any] | None:
+    """Latest-period holding percentage per category (promoters, fii, ...).
+
+    Upstox returns share-holding history newest-first, so entry [0] is the
+    most recent quarter.
+    """
+    if not isinstance(raw, list) or not raw:
+        return None
+    holding: dict[str, Any] = {}
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        category = entry.get("category")
+        history = entry.get("history")
+        if not category or not isinstance(history, list) or not history:
+            continue
+        latest = history[0]
+        if isinstance(latest, dict) and latest.get("value") is not None:
+            holding[category] = {
+                "period": latest.get("period"),
+                "percent": latest.get("value"),
+            }
+    return holding or None
+
+
+def _corporate_actions_summary(raw: Any) -> list[dict[str, Any]] | None:
+    """Ex-date corporate actions (dividend, bonus, split, rights) as a list."""
+    if not isinstance(raw, list) or not raw:
+        return None
+    events: list[dict[str, Any]] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        event = {
+            key: entry[key]
+            for key in ("name", "expiry_date", "amount", "ratio")
+            if entry.get(key) is not None
+        }
+        if event:
+            events.append(event)
+    return events or None
+
+
+def _earnings_summary(raw: Any) -> dict[str, Any] | None:
+    """Latest annual revenue / operating profit / net profit figures.
+
+    Upstox returns income-statement history newest-first (the newest entry
+    carries the change field), so entry [0] is the latest reported period.
+    """
+    if not isinstance(raw, dict) or not raw.get("income_statement"):
+        return None
+    figures: dict[str, Any] = {"units_in": raw.get("units_in")}
+    for category in ("revenue", "operating_profit", "net_profit"):
+        series: list[Any] = []
+        for entry in raw.get("income_statement") or []:
+            if isinstance(entry, dict) and entry.get("category") == category:
+                series = entry.get("history") or []
+                break
+        if series:
+            latest = series[0]
+            if isinstance(latest, dict):
+                figures[category] = {
+                    "value": latest.get("value"),
+                    "period": latest.get("period"),
+                    "change": latest.get("change"),
+                }
+    return figures
+
+
+def _summarize_fundamentals(
+    corporate_actions_section: dict[str, Any] | None,
+    shareholdings_section: dict[str, Any] | None,
+    income_statement_section: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Build the fundamentals block from the Upstox-direct caches (best effort)."""
+    actions_data = (
+        _section_data(corporate_actions_section) if corporate_actions_section else {}
+    )
+    shareholding_data = (
+        _section_data(shareholdings_section) if shareholdings_section else {}
+    )
+    income_data = (
+        _section_data(income_statement_section) if income_statement_section else {}
+    )
+    corporate_actions = _corporate_actions_summary(
+        actions_data.get("data") if isinstance(actions_data, dict) else None
+    )
+    shareholding = _shareholding_summary(
+        shareholding_data.get("data") if isinstance(shareholding_data, dict) else None
+    )
+    earnings = _earnings_summary(
+        income_data.get("data") if isinstance(income_data, dict) else None
+    )
+    if not any((corporate_actions, shareholding, earnings)):
+        return {
+            "available": False,
+            "reason": (
+                "No fundamentals cached. Run: scripts/fetch_upstox_data.py "
+                "--symbol <SYMBOL> --exchange <EXCHANGE> --mode "
+                "corporate-actions | share-holdings | income-statement"
+            ),
+        }
+    block: dict[str, Any] = {"available": True}
+    if corporate_actions:
+        block["corporate_actions"] = corporate_actions
+    if shareholding:
+        block["shareholding"] = shareholding
+    if earnings:
+        block["earnings"] = earnings
+    return block
+
+
+def _summarize_company(
+    quote_section: dict[str, Any],
+    symbol_section: dict[str, Any],
+    history_section: dict[str, Any],
+    news_section: dict[str, Any] | None = None,
+    corporate_actions_section: dict[str, Any] | None = None,
+    shareholdings_section: dict[str, Any] | None = None,
+    income_statement_section: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Derive a compact company summary (best effort)."""
+    quote = _section_data(quote_section)
+    symbol = _section_data(symbol_section)
+    summary = _quote_summary(quote)
+    summary.update(_history_summary(history_section))
+    summary["instrument"] = {
+        key: symbol[key]
+        for key in (
+            "symbol",
+            "token",
+            "exchange",
+            "instrumenttype",
+            "lotsize",
+            "tick_size",
+            "expiry",
+            "strike",
+        )
+        if isinstance(symbol, dict) and symbol.get(key) is not None
+    }
+    summary["fundamentals"] = _summarize_fundamentals(
+        corporate_actions_section,
+        shareholdings_section,
+        income_statement_section,
+    )
+    summary["news"] = _summarize_news(news_section)
+    return summary
+
+
+def _summarize_portfolio(
+    funds_section: dict[str, Any],
+    holdings_section: dict[str, Any],
+    positions_section: dict[str, Any],
+    orders_section: dict[str, Any],
+) -> dict[str, Any]:
+    """Derive a compact portfolio summary (best effort)."""
+    funds = _section_data(funds_section)
+    holdings = _section_data(holdings_section)
+    positions = _section_data(positions_section)
+    orders = _section_data(orders_section)
+
+    h_list = holdings.get("holdings") if isinstance(holdings, dict) else None
+    h_stats = holdings.get("statistics") if isinstance(holdings, dict) else None
+    pos_list = positions.get("data") if isinstance(positions, dict) else None
+    if not isinstance(pos_list, list):
+        pos_list = None
+    ord_list = orders.get("data") if isinstance(orders, dict) else None
+    if not isinstance(ord_list, list):
+        ord_list = None
+
+    holdings_pnl = _num(h_stats.get("pnl")) if isinstance(h_stats, dict) else 0.0
+    if isinstance(h_stats, dict):
+        holdings_value = _num(h_stats.get("currentvalue") or h_stats.get("current_value"))
+    else:
+        holdings_value = 0.0
+
+    positions_pnl = 0.0
+    positions_count = 0
+    gross_exposure = 0.0
+    for position in pos_list or []:
+        if not isinstance(position, dict):
+            continue
+        positions_count += 1
+        positions_pnl += _num(position.get("pnl"))
+        gross_exposure += abs(_num(position.get("quantity")) * _num(position.get("ltp")))
+
+    orders_count = len(ord_list or [])
+    open_orders = sum(
+        1
+        for order in ord_list or []
+        if isinstance(order, dict)
+        and str(order.get("status", "")).lower() in ("open", "pending", "trigger pending")
+    )
+
+    return {
+        "cash": funds.get("cash"),
+        "holdings_count": len(h_list) if isinstance(h_list, list) else None,
+        "holdings_value": round(holdings_value, 2) if holdings_value else None,
+        "unrealized_pnl": round(holdings_pnl + positions_pnl, 2),
+        "positions_count": positions_count,
+        "gross_exposure": round(gross_exposure, 2),
+        "orders_count": orders_count,
+        "open_orders": open_orders,
+        "note": (
+            "Derived by MCP from funds/holdings/positions/orders sections. "
+            "Funds keys vary by broker; see the funds section for the raw "
+            "provider payload."
+        ),
+    }
+
+
+def _summarize_positions(
+    positions_section: dict[str, Any],
+    open_position_section: dict[str, Any],
+    trades_section: dict[str, Any],
+) -> dict[str, Any]:
+    """Derive a compact position summary (best effort)."""
+    positions = _section_data(positions_section)
+    open_position = _section_data(open_position_section)
+    trades = _section_data(trades_section)
+
+    pos_list = positions.get("data") if isinstance(positions, dict) else None
+    if not isinstance(pos_list, list):
+        pos_list = None
+    tr_list = trades.get("data") if isinstance(trades, dict) else None
+    if not isinstance(tr_list, list):
+        tr_list = None
+
+    count = 0
+    total_pnl = 0.0
+    day_pnl = 0.0
+    gross_exposure = 0.0
+    for position in pos_list or []:
+        if not isinstance(position, dict):
+            continue
+        count += 1
+        total_pnl += _num(position.get("pnl"))
+        day_pnl += _num(
+            position.get("day_pnl")
+            or position.get("daypnl")
+            or position.get("today_pnl")
+        )
+        gross_exposure += abs(_num(position.get("quantity")) * _num(position.get("ltp")))
+
+    buys = 0
+    sells = 0
+    trade_value = 0.0
+    for trade in tr_list or []:
+        if not isinstance(trade, dict):
+            continue
+        trade_value += _num(trade.get("price") or trade.get("average_price")) * abs(
+            _num(trade.get("quantity"))
+        )
+        if str(trade.get("side") or trade.get("action") or "").upper() == "BUY":
+            buys += 1
+        else:
+            sells += 1
+
+    return {
+        "position_count": count,
+        "total_pnl": round(total_pnl, 2),
+        "day_pnl": round(day_pnl, 2),
+        "gross_exposure": round(gross_exposure, 2),
+        "trades_count": len(tr_list or []),
+        "trade_value": round(trade_value, 2),
+        "buys": buys,
+        "sells": sells,
+        "open_position_symbol": (
+            open_position.get("symbol")
+            if isinstance(open_position, dict)
+            else None
+        ),
+        "note": (
+            "Derived by MCP from position book, open position and trade book "
+            "sections."
+        ),
+    }
+
+
+@mcp.tool()
+def set_session_context(
+    broker: str | None = None,
+    exchange: str | None = None,
+    preferred_expiry: str | None = None,
+    watchlist: str | None = None,
+    portfolio: str | None = None,
+    current_market: str | None = None,
+) -> str:
+    """Set lightweight session context used as defaults across tool calls.
+
+    Reduces repetitive parameters: default broker, exchange, preferred expiry,
+    watchlist, portfolio and current market are injected into snapshots and
+    order validation when the caller does not pass them explicitly.
+
+    Args:
+        broker: Default broker name (e.g., upstox).
+        exchange: Default exchange (e.g., NFO, NSE_INDEX).
+        preferred_expiry: Default expiry in DDMMMYY format (e.g., 28AUG26).
+        watchlist: Default watchlist name.
+        portfolio: Default portfolio reference.
+        current_market: Default market context label.
+
+    Returns:
+        JSON with the updated session context.
+
+    Tool metadata:
+        rate_limit: 10 per minute
+        cache_ttl: none (immediate)
+        expected_latency: <5 ms
+    """
+    for key, value in (
+        ("broker", broker),
+        ("exchange", exchange),
+        ("preferred_expiry", preferred_expiry),
+        ("watchlist", watchlist),
+        ("portfolio", portfolio),
+        ("current_market", current_market),
+    ):
+        if value is not None:
+            _SESSION_CONTEXT[key] = value
+    return json.dumps(_SESSION_CONTEXT, indent=2, default=str)
+
+
+@mcp.tool()
+def get_session_context() -> str:
+    """Return the current session context (defaults for other tools).
+
+    Returns:
+        JSON with the session context fields.
+
+    Tool metadata:
+        rate_limit: 60 per minute
+        cache_ttl: none (immediate)
+        expected_latency: <5 ms
+    """
+    return json.dumps(_SESSION_CONTEXT, indent=2, default=str)
+
+
+@mcp.tool()
+def market_snapshot(
+    underlying: str | None = None,
+    exchange: str | None = None,
+    expiry_date: str | None = None,
+) -> str:
+    """Consolidated market snapshot for an underlying.
+
+    Aggregates quotes, option chain, GEX, max pain and IV smile into a single
+    response, with per-section provenance and a derived summary. Defaults come
+    from session context when not provided. Answers "analyze NIFTY/BANKNIFTY".
+
+    Args:
+        underlying: Underlying symbol (e.g., NIFTY, BANKNIFTY).
+        exchange: Exchange (defaults to session context or NSE_INDEX).
+        expiry_date: Expiry in DDMMMYY format (resolved from the backend when omitted).
+
+    Returns:
+        JSON with provenance-tagged sections (quote, option_chain, gex,
+        max_pain, iv_smile) and a derived summary block.
+
+    Tool metadata:
+        rate_limit: 10 per minute
+        cache_ttl: 30 s
+        expected_latency: 2-20 s (fans out to 5 backend analytics calls)
+    """
+    underlying = _normalize_symbol(
+        underlying or _SESSION_CONTEXT.get("current_market") or "NIFTY"
+    )
+    exchange = (exchange or _SESSION_CONTEXT.get("exchange") or "NSE_INDEX").upper()
+    expiry_date = _resolve_expiry(
+        underlying, exchange, expiry_date or _SESSION_CONTEXT.get("preferred_expiry")
+    )
+    snapshot = {"underlying": underlying, "exchange": exchange}
+    if not expiry_date:
+        snapshot["expiry_error"] = (
+            "Could not resolve expiry date. Pass expiry_date in DDMMMYY format."
+        )
+        return json.dumps(snapshot, indent=2, default=str)
+    snapshot["expiry_date"] = expiry_date
+    quote_section = _snapshot_section(
+        "/quotes", {"symbol": underlying, "exchange": exchange}, "live"
+    )
+    chain_section = _snapshot_section(
+        "/optionchain",
+        {
+            "underlying": underlying,
+            "exchange": exchange,
+            "expiry_date": expiry_date,
+            "strike_count": 10,
+        },
+        "live",
+    )
+    gex_section = _snapshot_section(
+        "/gex",
+        {"underlying": underlying, "exchange": exchange, "expiry_date": expiry_date},
+        "derived",
+    )
+    max_pain_section = _snapshot_section(
+        "/oitracker/maxpain",
+        {"underlying": underlying, "exchange": exchange, "expiry_date": expiry_date},
+        "derived",
+    )
+    iv_smile_section = _snapshot_section(
+        "/ivsmile",
+        {"underlying": underlying, "exchange": exchange, "expiry_date": expiry_date},
+        "derived",
+    )
+    snapshot["quote"] = quote_section
+    snapshot["option_chain"] = chain_section
+    snapshot["gex"] = gex_section
+    snapshot["max_pain"] = max_pain_section
+    snapshot["iv_smile"] = iv_smile_section
+    snapshot["summary"] = _summarize_market(
+        quote_section, chain_section, gex_section, max_pain_section, iv_smile_section
+    )
+    return json.dumps(snapshot, indent=2, default=str)
+
+
+@mcp.tool()
+def option_snapshot(
+    underlying: str,
+    exchange: str = "NFO",
+    expiry_date: str | None = None,
+) -> str:
+    """Consolidated options analytics snapshot for an underlying/expiry.
+
+    Aggregates option chain, OI tracker, max pain, GEX and IV smile with
+    per-section provenance and a derived positioning summary. Answers
+    "analyze today's option positioning".
+
+    Args:
+        underlying: Underlying symbol (e.g., NIFTY, BANKNIFTY).
+        exchange: Exchange (default NFO).
+        expiry_date: Expiry in DDMMMYY format (resolved when omitted).
+
+    Returns:
+        JSON with provenance-tagged sections (option_chain, oi_tracker,
+        max_pain, gex, iv_smile) and a derived summary block.
+
+    Tool metadata:
+        rate_limit: 10 per minute
+        cache_ttl: 30 s
+        expected_latency: 2-20 s (fans out to 5 backend analytics calls)
+    """
+    underlying = _normalize_symbol(underlying)
+    exchange = exchange.upper()
+    expiry_date = _resolve_expiry(
+        underlying, exchange, expiry_date or _SESSION_CONTEXT.get("preferred_expiry")
+    )
+    snapshot = {"underlying": underlying, "exchange": exchange}
+    if not expiry_date:
+        snapshot["expiry_error"] = (
+            "Could not resolve expiry date. Pass expiry_date in DDMMMYY format."
+        )
+        return json.dumps(snapshot, indent=2, default=str)
+    snapshot["expiry_date"] = expiry_date
+    chain_section = _snapshot_section(
+        "/optionchain",
+        {
+            "underlying": underlying,
+            "exchange": exchange,
+            "expiry_date": expiry_date,
+            "strike_count": 10,
+        },
+        "live",
+    )
+    oi_section = _snapshot_section(
+        "/oitracker",
+        {"underlying": underlying, "exchange": exchange, "expiry_date": expiry_date},
+        "derived",
+    )
+    max_pain_section = _snapshot_section(
+        "/oitracker/maxpain",
+        {"underlying": underlying, "exchange": exchange, "expiry_date": expiry_date},
+        "derived",
+    )
+    gex_section = _snapshot_section(
+        "/gex",
+        {"underlying": underlying, "exchange": exchange, "expiry_date": expiry_date},
+        "derived",
+    )
+    iv_smile_section = _snapshot_section(
+        "/ivsmile",
+        {"underlying": underlying, "exchange": exchange, "expiry_date": expiry_date},
+        "derived",
+    )
+    snapshot["option_chain"] = chain_section
+    snapshot["oi_tracker"] = oi_section
+    snapshot["max_pain"] = max_pain_section
+    snapshot["gex"] = gex_section
+    snapshot["iv_smile"] = iv_smile_section
+    snapshot["summary"] = _summarize_positioning(
+        oi_section, max_pain_section, gex_section, iv_smile_section
+    )
+    return json.dumps(snapshot, indent=2, default=str)
+
+
+@mcp.tool()
+def portfolio_snapshot() -> str:
+    """Consolidated account snapshot: funds, holdings, positions and orders.
+
+    Funds are normalized to stable keys (provider-specific remainder passed
+    through tagged as such). Answers "analyze my portfolio".
+
+    Returns:
+        JSON with provenance-tagged sections (funds, holdings, positions,
+        orders) and a derived summary block.
+
+    Tool metadata:
+        rate_limit: 10 per minute
+        cache_ttl: 30 s
+        expected_latency: 1-5 s (4 backend account calls)
+    """
+    funds_section = _snapshot_section("/funds", {}, "live")
+    funds_data = funds_section.get("data")
+    if isinstance(funds_data, dict) and "error" not in funds_data:
+        normalized, provider_specific = _normalize_funds(funds_data)
+        funds_section["data"] = {
+            "normalized": normalized,
+            "provider_specific": provider_specific,
+        }
+    holdings_section = _snapshot_section("/holdings", {}, "live")
+    positions_section = _snapshot_section("/positionbook", {}, "live")
+    orders_section = _snapshot_section("/orderbook", {}, "live")
+    snapshot = {
+        "funds": funds_section,
+        "holdings": holdings_section,
+        "positions": positions_section,
+        "orders": orders_section,
+        "summary": _summarize_portfolio(
+            funds_section, holdings_section, positions_section, orders_section
+        ),
+    }
+    return json.dumps(snapshot, indent=2, default=str)
+
+
+@mcp.tool()
+def company_snapshot(company: str, exchange: str = "NSE") -> str:
+    """Consolidated company snapshot: search, symbol info, history, quote, news
+    and fundamentals (corporate actions, shareholdings, earnings).
+
+    News and fundamentals come from Upstox-direct caches populated by
+    scripts/fetch_upstox_data.py. Answers "analyze RELIANCE".
+
+    Args:
+        company: Company symbol or search term (e.g., INFY, RELIANCE).
+        exchange: Exchange (default NSE).
+
+    Returns:
+        JSON with provenance-tagged sections (quote, symbol, search,
+        history, news, corporate_actions, shareholdings, income_statement)
+        and a derived summary block.
+
+    Tool metadata:
+        rate_limit: 10 per minute
+        cache_ttl: 60 s
+        expected_latency: 1-5 s (3 backend data calls + 5 cache reads)
+    """
+    company = company.strip().upper()
+    exchange = exchange.upper()
+    quote_section = _snapshot_section(
+        "/quotes", {"symbol": company, "exchange": exchange}, "live"
+    )
+    symbol_section = _snapshot_section(
+        "/symbol", {"symbol": company, "exchange": exchange}, "live"
+    )
+    search_section = _snapshot_section(
+        "/search", {"searchtext": company, "exchange": exchange}, "live"
+    )
+    history_section = _company_history_section(company, exchange)
+    news_section = _company_news_section(company, exchange)
+    corporate_actions_section = _company_fundamentals_section(
+        "corporate-actions", company, exchange
+    )
+    shareholdings_section = _company_fundamentals_section(
+        "share-holdings", company, exchange
+    )
+    income_statement_section = _company_fundamentals_section(
+        "income-statement", company, exchange
+    )
+    snapshot = {
+        "quote": quote_section,
+        "symbol": symbol_section,
+        "search": search_section,
+        "history": history_section,
+        "news": news_section,
+        "corporate_actions": corporate_actions_section,
+        "shareholdings": shareholdings_section,
+        "income_statement": income_statement_section,
+        "summary": _summarize_company(
+            quote_section,
+            symbol_section,
+            history_section,
+            news_section,
+            corporate_actions_section,
+            shareholdings_section,
+            income_statement_section,
+        ),
+    }
+    return json.dumps(snapshot, indent=2, default=str)
+
+
+@mcp.tool()
+def position_snapshot() -> str:
+    """Consolidated position snapshot: position book, open position, trade book.
+
+    Returns:
+        JSON with provenance-tagged sections (positions, open_position,
+        trades) and a derived summary block.
+
+    Tool metadata:
+        rate_limit: 10 per minute
+        cache_ttl: 30 s
+        expected_latency: 1-5 s (3 backend account calls)
+    """
+    positions_section = _snapshot_section("/positionbook", {}, "live")
+    open_position_section = _snapshot_section("/openposition", {}, "live")
+    trades_section = _snapshot_section("/tradebook", {}, "live")
+    snapshot = {
+        "positions": positions_section,
+        "open_position": open_position_section,
+        "trades": trades_section,
+        "summary": _summarize_positions(
+            positions_section, open_position_section, trades_section
+        ),
+    }
+    return json.dumps(snapshot, indent=2, default=str)
+
+
+def _route_subject(lowered: str) -> str:
+    """Pick an analysis route from the subject wording."""
+    if any(k in lowered for k in ("portfolio", "holdings", "account")):
+        return "portfolio"
+    if "position" in lowered:
+        return "position"
+    if "option" in lowered:
+        return "options"
+    if any(k in lowered for k in ("company", "fundamental", "news")):
+        return "company"
+    if "capabilit" in lowered:
+        return "capabilities"
+    if "health" in lowered or "system" in lowered:
+        return "health"
+    return "market"
+
+
+def _subject_symbol(subject: str) -> str:
+    """Extract a symbol from a subject phrase (strip qualifiers)."""
+    symbol = subject.upper().strip()
+    for suffix in (" OPTIONS", " OPTION", " INDEX"):
+        if symbol.endswith(suffix):
+            symbol = symbol[: -len(suffix)].strip()
+    return symbol or "NIFTY"
+
+
+def _infer_exchange(symbol: str) -> str:
+    """Default exchange for a symbol: index memberships, else NSE."""
+    if symbol in NSE_INDEX_SYMBOLS:
+        return "NSE_INDEX"
+    if symbol in BSE_INDEX_SYMBOLS:
+        return "BSE_INDEX"
+    return "NSE"
+
+
+def _snapshot_payload(fn, *args, **kwargs) -> dict:
+    """Call a snapshot tool and return its inner data, tolerating failures."""
+    try:
+        parsed = json.loads(fn(*args, **kwargs))
+    except (TypeError, ValueError) as exc:
+        return {"error": f"tool call failed: {exc}"}
+    if not isinstance(parsed, dict):
+        return {"error": f"unexpected tool output: {str(parsed)[:200]}"}
+    if parsed.get("success") is False:
+        return {
+            "error": parsed.get("message", "tool failed"),
+            "error_code": parsed.get("error_code"),
+        }
+    if "data" in parsed:
+        return parsed["data"]
+    return parsed
+
+
+@mcp.tool()
+def analyze(subject: str, analysis_type: str = "auto") -> str:
+    """High-level analysis entry point that routes a subject to a snapshot.
+
+    One call to start most sessions: pass a symbol or a phrase like
+    "my portfolio" or "BANKNIFTY options" and get a structured context
+    back without choosing among the low-level snapshot tools. The
+    specialized tools remain available for deeper work.
+
+    Args:
+        subject: What to analyze, e.g. "NIFTY", "RELIANCE",
+            "BANKNIFTY options", "my portfolio", "my positions",
+            "company RELIANCE", "capabilities", "system health".
+        analysis_type: "auto" (route by subject wording) or an explicit
+            "market", "options", "company", "portfolio", "position",
+            "capabilities" or "health".
+
+    Returns:
+        JSON with the resolved route and the underlying snapshot payload.
+
+    Tool metadata:
+        rate_limit: 10 per minute
+        cache_ttl: 30 s
+        expected_latency: 1-20 s (delegates to one snapshot tool)
+    """
+    subject_clean = (subject or "").strip()
+    if not subject_clean:
+        return json.dumps(
+            {"status": "error", "message": "subject is required."}, indent=2
+        )
+    route = (analysis_type or "auto").strip().lower()
+    if route not in (
+        "auto", "market", "options", "company", "portfolio", "position",
+        "capabilities", "health",
+    ):
+        return json.dumps(
+            {
+                "status": "error",
+                "message": f"Unknown analysis_type {analysis_type!r}. Use auto, "
+                "market, options, company, portfolio, position, capabilities "
+                "or health.",
+            },
+            indent=2,
+        )
+    if route == "auto":
+        route = _route_subject(subject_clean.lower())
+    if route == "portfolio":
+        payload = _snapshot_payload(portfolio_snapshot)
+        resolved = {}
+    elif route == "position":
+        payload = _snapshot_payload(position_snapshot)
+        resolved = {}
+    elif route == "capabilities":
+        payload = _snapshot_payload(get_capabilities)
+        resolved = {}
+    elif route == "health":
+        payload = _snapshot_payload(system_health)
+        resolved = {}
+    elif route == "company":
+        symbol = _subject_symbol(subject_clean)
+        payload = _snapshot_payload(company_snapshot, symbol, "NSE")
+        resolved = {"symbol": symbol, "exchange": "NSE"}
+    elif route == "options":
+        symbol = _subject_symbol(subject_clean)
+        payload = _snapshot_payload(option_snapshot, symbol, "NFO")
+        resolved = {"symbol": symbol, "exchange": "NFO"}
+    else:
+        symbol = _subject_symbol(subject_clean)
+        exchange = _infer_exchange(symbol)
+        payload = _snapshot_payload(market_snapshot, symbol, exchange)
+        resolved = {"symbol": symbol, "exchange": exchange}
+    return json.dumps(
+        {
+            "status": "success",
+            "subject": subject_clean,
+            "analysis_type": route,
+            "resolved": resolved,
+            "analysis": payload,
+        },
+        indent=2,
+        default=str,
+    )
+
+
+def _registered_tool_count() -> int:
+    """Number of tools registered with FastMCP (drift-safe against the map)."""
+    manager = getattr(mcp, "_tool_manager", None)
+    tools = getattr(manager, "_tools", None) if manager is not None else None
+    if isinstance(tools, dict):
+        return len(tools)
+    return 0
+
+
+@mcp.tool()
+def get_capabilities() -> str:
+    """Report MCP server capabilities so AI agents can adapt dynamically.
+
+    Returns:
+        JSON with available brokers, enabled modules, supported exchanges,
+        supported analytics, versions and available snapshot/risk tools.
+
+    Tool metadata:
+        rate_limit: 30 per minute
+        cache_ttl: 300 s
+        expected_latency: <10 ms
+    """
+    return json.dumps(
+        {
+            "backend_version": _get_backend_version(),
+            "mcp_version": MCP_VERSION,
+            "broker": _get_broker(),
+            "available_brokers": [
+                b.strip()
+                for b in os.getenv("VALID_BROKERS", "").split(",")
+                if b.strip()
+            ]
+            or [_get_broker()],
+            "enabled_modules": [
+                "orders",
+                "market_data",
+                "options_analytics",
+                "strategies",
+                "strategy_portfolio",
+                "risk_validation",
+                "snapshots",
+            ],
+            "supported_exchanges": [
+                "NSE", "BSE", "NFO", "BFO", "CDS", "BCD", "MCX", "NCDEX",
+                "NSE_INDEX", "BSE_INDEX", "GLOBAL_INDEX",
+            ],
+            "supported_analytics": [
+                "gex", "iv_smile", "oi_tracker", "max_pain", "oi_profile",
+                "straddle", "vol_surface", "iv_chart", "gamma_density",
+                "arbitrage", "multi_strike_oi", "indicators",
+            ],
+            "snapshot_tools": [
+                "market_snapshot", "option_snapshot", "portfolio_snapshot",
+                "company_snapshot", "position_snapshot",
+            ],
+            "risk_tools": [
+                "validate_order", "estimate_order_risk", "dry_run_order",
+            ],
+            "tool_count": _registered_tool_count(),
+            "feature_flags": {
+                "http_transport": (
+                    os.getenv("MCP_HTTP_ENABLED", "False").lower() == "true"
+                ),
+                "api_key_auth": (
+                    os.getenv("MCP_API_KEY_AUTH", "True").lower() == "true"
+                ),
+                "write_scope_enabled": (
+                    os.getenv("MCP_OAUTH_WRITE_SCOPE_ENABLED", "True").lower()
+                    == "true"
+                ),
+                "tool_cache_enabled": True,
+                "streaming": False,
+            },
+            "rate_limits": {
+                "dispatch_per_minute": 120,
+                "scope_read_per_minute": int(
+                    os.getenv("MCP_RATE_LIMIT_READ", "60").split()[0]
+                ),
+                "scope_write_per_minute": int(
+                    os.getenv("MCP_RATE_LIMIT_WRITE", "50").split()[0]
+                ),
+                "expensive_per_minute": int(
+                    os.getenv("MCP_RATE_LIMIT_EXPENSIVE", "30").split()[0]
+                ),
+            },
+        },
+        indent=2,
+        default=str,
+    )
+
+
+@mcp.tool()
+def system_health() -> str:
+    """Report system health: broker, database, market data, versions, uptime.
+
+    Returns:
+        JSON with broker connectivity, database status, market data status,
+        market status, versions and uptime.
+
+    Tool metadata:
+        rate_limit: 10 per minute
+        cache_ttl: 30 s
+        expected_latency: 50-500 ms
+    """
+    uptime_seconds = int(time.monotonic() - _START_TIME)
+    ping_response = _quick_post("/ping", {})
+    ping_ok = _parse_json_response(ping_response).get("status") == "success"
+    quotes_probe = _quick_post(
+        "/quotes", {"symbol": "NIFTY", "exchange": "NSE_INDEX"}, timeout=5.0
+    )
+    market_data_ok = _parse_json_response(quotes_probe).get("status") == "success"
+    return json.dumps(
+        {
+            "status": "healthy" if ping_ok else "degraded",
+            "uptime_seconds": uptime_seconds,
+            "backend_version": _get_backend_version(),
+            "mcp_version": MCP_VERSION,
+            "broker": _get_broker(),
+            "market_status": _get_market_status(),
+            "broker_connectivity": "ok" if ping_ok else "down",
+            "database_status": "ok" if ping_ok else "down",
+            "market_data_status": "ok" if market_data_ok else "down",
+            "cache_status": "ok",
+            "scheduler_status": "not exposed",
+            "websocket_status": "not exposed",
+        },
+        indent=2,
+        default=str,
+    )
+
+
+_ORDER_PRICE_TYPES = ("MARKET", "LIMIT", "SL", "SL-M")
+_ORDER_PRODUCTS = ("CNC", "NRML", "MIS")
+
+
+def _validate_order_fields(
+    symbol: str,
+    quantity: int,
+    action: str,
+    exchange: str,
+    price_type: str,
+    product: str,
+    price: float | None,
+    trigger_price: float | None,
+) -> tuple[bool, list[str], dict[str, Any]]:
+    """Validate order fields without placing any order. Returns (valid, errors, normalized)."""
+    errors: list[str] = []
+    normalized = {
+        "symbol": _normalize_symbol(symbol),
+        "quantity": quantity,
+        "action": action.upper(),
+        "exchange": exchange.upper(),
+        "price_type": price_type.upper(),
+        "product": product.upper(),
+        "price": price,
+        "trigger_price": trigger_price,
+    }
+    if normalized["action"] not in ("BUY", "SELL"):
+        errors.append("action must be BUY or SELL")
+    if normalized["price_type"] not in _ORDER_PRICE_TYPES:
+        errors.append(f"price_type must be one of {', '.join(_ORDER_PRICE_TYPES)}")
+    if normalized["product"] not in _ORDER_PRODUCTS:
+        errors.append(f"product must be one of {', '.join(_ORDER_PRODUCTS)}")
+    if not isinstance(quantity, int) or quantity <= 0:
+        errors.append("quantity must be a positive integer")
+    if normalized["price_type"] in ("LIMIT", "SL", "SL-M") and (
+        price is None or price <= 0
+    ):
+        errors.append("price is required and must be positive for LIMIT/SL/SL-M")
+    if normalized["price_type"] == "SL" and (trigger_price is None or trigger_price <= 0):
+        errors.append("trigger_price is required and must be positive for SL")
+    return (not errors, errors, normalized)
+
+
+@mcp.tool()
+def validate_order(
+    symbol: str,
+    quantity: int,
+    action: str,
+    exchange: str = "NSE",
+    price_type: str = "MARKET",
+    product: str = "MIS",
+    price: float | None = None,
+    trigger_price: float | None = None,
+) -> str:
+    """Validate an order before execution. Never places an order.
+
+    Checks action, price type, product, quantity and required price fields.
+
+    Args:
+        symbol: Symbol in canonical format (e.g., NIFTY, NIFTY11AUG2624500CE).
+        quantity: Quantity as a positive integer.
+        action: BUY or SELL.
+        exchange: Exchange (default NSE).
+        price_type: MARKET, LIMIT, SL or SL-M (default MARKET).
+        product: CNC, NRML or MIS (default MIS).
+        price: Required for LIMIT/SL/SL-M.
+        trigger_price: Required for SL.
+
+    Returns:
+        JSON with valid flag, errors and normalized order fields.
+
+    Tool metadata:
+        rate_limit: 30 per minute
+        cache_ttl: none
+        expected_latency: <5 ms
+    """
+    try:
+        valid, errors, normalized = _validate_order_fields(
+            symbol, quantity, action, exchange, price_type, product, price, trigger_price
+        )
+    except ValueError as e:
+        return json.dumps({"valid": False, "errors": [str(e)], "normalized_order": None})
+    return json.dumps(
+        {"valid": valid, "errors": errors, "normalized_order": normalized},
+        indent=2,
+        default=str,
+    )
+
+
+@mcp.tool()
+def estimate_order_risk(
+    symbol: str,
+    quantity: int,
+    action: str,
+    exchange: str = "NSE",
+    price: float | None = None,
+) -> str:
+    """Estimate order risk (notional and max loss). Never places an order.
+
+    Fetches the current price when not provided.
+
+    Args:
+        symbol: Symbol in canonical format.
+        quantity: Quantity as a positive integer.
+        action: BUY or SELL.
+        exchange: Exchange (default NSE).
+        price: Reference price; fetched from quotes when omitted.
+
+    Returns:
+        JSON with notional value, estimated max loss and disclaimer.
+
+    Tool metadata:
+        rate_limit: 20 per minute
+        cache_ttl: 15 s
+        expected_latency: 50-500 ms
+    """
+    try:
+        symbol = _normalize_symbol(symbol)
+        exchange = exchange.upper()
+        if not isinstance(quantity, int) or quantity <= 0:
+            return json.dumps(
+                {
+                    "valid": False,
+                    "errors": ["quantity must be a positive integer"],
+                }
+            )
+        if price is None or price <= 0:
+            quote = _snapshot_get("/quotes", symbol=symbol, exchange=exchange)
+            price = quote.get("ltp") or quote.get("last_price")
+        if price is None:
+            return json.dumps(
+                {
+                    "valid": False,
+                    "errors": [
+                        "Could not determine reference price; pass price explicitly"
+                    ],
+                }
+            )
+        notional = float(price) * quantity
+        max_loss = notional if action.upper() == "BUY" else notional
+        return json.dumps(
+            {
+                "valid": True,
+                "symbol": symbol,
+                "exchange": exchange,
+                "quantity": quantity,
+                "reference_price": float(price),
+                "notional_value": round(notional, 2),
+                "estimated_max_loss": round(max_loss, 2),
+                "note": (
+                    "Margin requirement depends on broker leverage and is not "
+                    "estimated here. This is a risk estimate only; no order was placed."
+                ),
+            },
+            indent=2,
+            default=str,
+        )
+    except ValueError as e:
+        return json.dumps({"valid": False, "errors": [str(e)]})
+
+
+@mcp.tool()
+def dry_run_order(
+    symbol: str,
+    quantity: int,
+    action: str,
+    exchange: str = "NSE",
+    price_type: str = "MARKET",
+    product: str = "MIS",
+    price: float | None = None,
+    trigger_price: float | None = None,
+) -> str:
+    """Simulate an order: build the exact payload, validate it, never execute.
+
+    Returns the payload a real place_order call would send so callers can
+    inspect it before committing to execution.
+
+    Args:
+        symbol: Symbol in canonical format.
+        quantity: Quantity as a positive integer.
+        action: BUY or SELL.
+        exchange: Exchange (default NSE).
+        price_type: MARKET, LIMIT, SL or SL-M (default MARKET).
+        product: CNC, NRML or MIS (default MIS).
+        price: Required for LIMIT/SL/SL-M.
+        trigger_price: Required for SL.
+
+    Returns:
+        JSON with dry_run flag, would_execute, payload, validation and a note.
+
+    Tool metadata:
+        rate_limit: 30 per minute
+        cache_ttl: none
+        expected_latency: <10 ms
+    """
+    try:
+        valid, errors, normalized = _validate_order_fields(
+            symbol, quantity, action, exchange, price_type, product, price, trigger_price
+        )
+    except ValueError as e:
+        return json.dumps(
+            {"dry_run": True, "valid": False, "errors": [str(e)], "payload": None}
+        )
+    if not valid:
+        return json.dumps(
+            {
+                "dry_run": True,
+                "valid": False,
+                "errors": errors,
+                "payload": None,
+                "note": "No real order was placed.",
+            },
+            indent=2,
+            default=str,
+        )
+    payload = {
+        "symbol": normalized["symbol"],
+        "exchange": normalized["exchange"],
+        "action": normalized["action"],
+        "quantity": str(normalized["quantity"]),
+        "product": normalized["product"],
+        "pricetype": normalized["price_type"],
+        "price": "0" if normalized["price"] is None else str(normalized["price"]),
+        "trigger_price": (
+            "0" if normalized["trigger_price"] is None else str(normalized["trigger_price"])
+        ),
+        "strategy": MCP_STRATEGY,
+    }
+    return json.dumps(
+        {
+            "dry_run": True,
+            "valid": True,
+            "would_execute": "place_order",
+            "payload": payload,
+            "validation": normalized,
+            "note": "No real order was placed. Use place_order to execute.",
+        },
+        indent=2,
+        default=str,
     )
 
 

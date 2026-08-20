@@ -15,8 +15,11 @@ Thumbs.db
 .vscode/
 .superpowers/
 .idea/
-.claude/settings.json
-.claude/settings.local.json
+.claude/
+.agents/
+.omo/
+.envsitter/
+.playwright-mcp/
 .python-version
 config.ini
 .venvv
@@ -97,3 +100,20 @@ nul
 
 .env.*
 *.env.backup
+
+# MCP cache
+mcp/cache/
+
+# Generated backtesting output
+backtesting/*.html
+backtesting/*/*.html
+
+# OpenAlgo uploaded/runtime strategy files
+strategies/scripts/*.py
+strategies/scripts/*.py.bak-*
+
+# Local OpenCode configuration
+opencode.json
+
+# Local skills lock
+skills-lock.json

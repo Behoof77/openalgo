@@ -40,7 +40,7 @@ jobs:
           username: ubuntu
           key: ${{ secrets.ORACLE_SSH_KEY }}
           timeout: 300s
-          envs: DEPLOY_SHA,ORACLE_WORKDIR
+          envs: DEPLOY_SHA,DEPLOY_BRANCH,ORACLE_WORKDIR
           script: |
             set -euo pipefail
             echo "=== Deployment started ==="
